@@ -553,7 +553,7 @@ async function loadHistory() {
           <span class="history-score-badge ${riskClass}">${escapeHtml(label)}</span>
           <span class="history-score-num">${score}/100</span>
         </div>
-        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 160))}</div>
+        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 400))}</div>
       </article>
       `;
     }).join('') : '<div class="history-item">No scans yet.</div>';
