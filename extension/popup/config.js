@@ -1,4 +1,4 @@
-const APP_ENV = 'production';
+const APP_ENV = 'development';
 
 const CONFIG = {
   development: {
