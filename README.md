@@ -85,6 +85,46 @@ nexus-kitty/
 3. View the safety score, summary, and categorized findings.
 4. Use the "Ask Kitty" feature to ask specific questions about the terms.
 
+## Environment Management & Deployment
+
+The extension supports switching between a local development backend and the production backend via `extension/popup/config.js`:
+
+| Environment | Backend URL |
+|---|---|
+| `development` | `http://localhost:8000` |
+| `production` | `https://nexuskitty.onrender.com` |
+
+### Local Development Workflow
+
+1. **Run the backend locally:**
+   ```bash
+   cd backend
+   uvicorn app.main:app --reload
+   ```
+
+2. **Set extension to development mode:**
+   In `extension/popup/config.js`, change `APP_ENV` to `'development'`:
+   ```javascript
+   const APP_ENV = 'development';
+   ```
+
+3. **Develop and test freely** — changes to the extension or backend are local only.
+
+4. **When ready, set extension back to production mode:**
+   ```javascript
+   const APP_ENV = 'production';
+   ```
+
+5. **Deploy backend to Render:**
+   ```bash
+   git add .
+   git commit -m "Your deployment message"
+   git push origin main
+   ```
+   Render auto-detects the push and deploys within 1–2 minutes.
+
+> **Note:** On Render's free tier, the instance spins down after ~15 minutes of inactivity. The first request after idle will take 30–50 seconds (cold start) to wake the server. To disable auto-deploy and use manual deploys instead, toggle **Auto-Deploy** to **Off** in your Render service Settings.
+
 ## Notes
 
 - The extension connects to the production backend at `https://nexuskitty.onrender.com`.
