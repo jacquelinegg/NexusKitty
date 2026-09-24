@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "NexusKitty AI - ToS & Privacy Shield",
+  "version": "1.0.0",
+  "description": "AI-powered privacy and ToS analysis for every website you visit.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "scripts/background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "NexusKitty"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["scripts/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
