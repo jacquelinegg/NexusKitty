@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from urllib.parse import urlparse
 import logging
 
-from .schemas import AnalyzeRequest, AskRequest, ToSAnalysisResult, AskResponse
+from .schemas import AnalyzeRequest, AskRequest, ClassifyRequest, ClassifyResponse, ToSAnalysisResult, AskResponse
 from .services.llm_service import LLMService
 from .services.db_service import DBService
 from .config import settings
@@ -622,6 +622,7 @@ async def root():
             "/api/health",
             "/api/analyze",
             "/api/ask",
+            "/api/classify",
             "/api/history",
             "/docs",
         ],
@@ -633,3 +634,35 @@ async def health_check():
     return {
         "status": "ok"
     }
+
+
+@app.post(
+    "/api/classify",
+    response_model=ClassifyResponse,
+)
+async def classify_text_endpoint(
+    request: ClassifyRequest,
+):
+    """
+    Classify whether the given text is a legal/consent document.
+    Returns is_legal: true for privacy policies, cookie banners, consent
+    dialogs, terms of service, etc. (language-independent).
+    """
+
+    try:
+        logger.info(
+            f"Classifying text: text_len={len(request.text)}"
+        )
+
+        result = await llm_service.classify_text(request.text)
+
+        logger.info(
+            f"Classification result: is_legal={result.is_legal}"
+        )
+
+        return result
+
+    except Exception as e:
+        logger.exception("Error in classify endpoint")
+        # Conservative fallback: assume legal so consent text is never hidden
+        return ClassifyResponse(is_legal=True, error=str(e))

@@ -13,10 +13,16 @@ except ImportError:
     genai = None
     types = None
 
-from ..prompts import TOS_ANALYSIS_SYSTEM_PROMPT, ASK_NEXUSKITTY_SYSTEM_PROMPT, SYSTEM_PROMPT
+from ..prompts import (
+    TOS_ANALYSIS_SYSTEM_PROMPT,
+    ASK_NEXUSKITTY_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    CLASSIFY_SYSTEM_PROMPT,
+)
 from ..schemas import (
     ToSAnalysisResult,
     AskResponse,
+    ClassifyResponse,
     Finding,
     AttentionLevel,
     ClauseCategory,
@@ -457,3 +463,63 @@ class LLMService:
             return gemini_answer
 
         return self._fallback_answer(context_text, question)
+
+    # ------------------------------------------------------------------
+    # Classify: is this text a legal/consent document?
+    # ------------------------------------------------------------------
+
+    def _classify_with_groq(self, text: str) -> Optional[bool]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result.get("is_legal")
+
+    def _classify_with_gemini(self, text: str) -> Optional[bool]:
+        if not self.gemini_client or not types:
+            return None
+        try:
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_model,
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=CLASSIFY_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema={
+                        "type": "object",
+                        "properties": {
+                            "is_legal": {"type": "boolean"}
+                        },
+                        "required": ["is_legal"],
+                    },
+                    temperature=0,
+                ),
+            )
+            result = json.loads(response.text)
+            return result.get("is_legal")
+        except Exception:
+            logger.exception("Gemini classify failed")
+            return None
+
+    async def classify_text(self, text: str) -> ClassifyResponse:
+        """Classify whether text is a legal/consent document (Groq → Gemini → conservative fallback)."""
+        error = None
+        try:
+            result = await asyncio.to_thread(self._classify_with_groq, text)
+            if result is not None:
+                return ClassifyResponse(is_legal=result)
+        except Exception as e:
+            error = self._error_kind(e)
+            logger.warning("Groq classify failed (%s): %s", error, str(e)[:500])
+
+        gemini_result = await asyncio.to_thread(self._classify_with_gemini, text)
+        if gemini_result is not None:
+            return ClassifyResponse(is_legal=gemini_result)
+
+        # Conservative fallback: assume legal so we don't hide consent text
+        return ClassifyResponse(is_legal=True, error=error or "providers_unavailable")

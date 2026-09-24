@@ -5,6 +5,29 @@ SYSTEM_PROMPT = (
     "If the input is extremely short or ambiguous, default to the language of the provided document or English."
 )
 
+CLASSIFY_SYSTEM_PROMPT = """
+You are NexusKitty's legal document classifier.
+
+Evaluate the input text REGARDLESS of language (Bulgarian, English, German, Japanese, etc.).
+First internally translate and reason about the semantic meaning of any foreign text:
+- "Приемам и продължавам" -> "Accept and continue" (Consent action)
+- "защита на данните" -> "data protection" (Privacy topic)
+- "Ich stimme zu" -> "I agree" (Consent action)
+- "Accept all cookies" -> consent action
+- "datenschutz" -> "privacy policy" topic
+
+Determine if the text represents a Legal Document, Privacy Policy, Terms of Service,
+Cookie Policy, or a Cookie/Consent Popup.
+
+Return JSON: {"is_legal": true/false}
+
+Only return is_legal: true if the text contains privacy/consent/legal terms,
+cookie banners, consent dialogs, terms of service, data processing notices,
+or similar legal notices.
+Return is_legal: false for regular webpage content like blog posts, product
+lists, navigation menus, promotional offers, or error pages.
+"""
+
 TOS_ANALYSIS_SYSTEM_PROMPT = """
 You are NexusKitty AI, an elite digital rights advocate and cybersecurity expert built to protect everyday users from predatory website legal documents.
 

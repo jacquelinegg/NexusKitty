@@ -427,8 +427,22 @@ async function initialize() {
     }
 
     if (!looksLikeLegalDocument(state.url, state.text) && !state.consentControls.length && !state.legalSurface) {
-      showError('This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.', true);
-      return;
+      // Secondary AI check: classify via backend to catch multilingual/legal text
+      // that the word-based heuristic missed.
+      try {
+        const classifyResp = await request('/api/classify', {
+          method: 'POST',
+          body: JSON.stringify({ text: state.text.slice(0, 2000) }),
+        });
+
+        if (!classifyResp.is_legal) {
+          showError('This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.', true);
+          return;
+        }
+      } catch {
+        // If the classify endpoint is unreachable, proceed with analysis
+        // (conservative: don't block potentially legal content).
+      }
     }
 
     await analyzeCurrentPage();

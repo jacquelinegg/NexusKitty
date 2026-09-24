@@ -98,3 +98,12 @@ class AskResponse(BaseModel):
         None,
         description="Exact verbatim quote copied from the document in its original language, or null if the document does not address the question",
     )
+
+
+class ClassifyRequest(BaseModel):
+    text: str = Field(..., description="Extracted text to classify")
+
+
+class ClassifyResponse(BaseModel):
+    is_legal: bool = Field(..., description="Whether the text is a legal/consent document")
+    error: Optional[str] = None
