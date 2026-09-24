@@ -87,7 +87,7 @@ nexus-kitty/
 
 ## Notes
 
-- The extension currently uses `localhost:8000` for the backend. Adjust the `host_permissions` in `manifest.json` if your backend runs on a different URL.
+- The extension connects to the production backend at `https://nexuskitty.onrender.com`.
 - The content script extracts text from common containers (`<main>`, `<article>`, etc.) and stores it in `localStorage`.
 - The popup retrieves the extracted text and sends it to the backend for analysis.
 

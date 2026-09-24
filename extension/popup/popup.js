@@ -1,4 +1,4 @@
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'https://nexuskitty.onrender.com';
 
 const state = {
   url: '',
@@ -372,7 +372,7 @@ async function initialize() {
     await analyzeCurrentPage();
   } catch (error) {
     setStatus(false);
-    showError('The local backend is unavailable. Start FastAPI on 127.0.0.1:8000 and reload the extension.');
+    showError('The backend is unavailable. Check https://nexuskitty.onrender.com and reload the extension.');
     console.error('NexusKitty initialization failed:', error);
   }
 }
