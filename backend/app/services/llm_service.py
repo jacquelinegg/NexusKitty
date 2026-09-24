@@ -333,7 +333,7 @@ class LLMService:
         )
 
     def _detect_language(self, text: str) -> str:
-        """Detect language using Unicode script ranges (covers all major scripts)."""
+        """Detect language using Unicode script ranges + langdetect for Latin script."""
         if re.search(r'[\u3040-\u30FF\u309B-\u30FC]', text):
             return 'ja'
         if re.search(r'[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7FF]', text):
@@ -356,24 +356,67 @@ class LLMService:
             if re.search(r'[ыэё]', text):
                 return 'ru'
             return 'bg'
-        return 'en'
+        try:
+            from langdetect import detect
+            return detect(text)
+        except Exception:
+            return 'en'
+
+    _FALLBACK_NO_DOCS = {
+        'bg': 'Този документ не предвижда информация относно тази тема.',
+        'ru': 'Этот документ не содержит информации по данной теме.',
+        'uk': 'Цей документ не містить інформації щодо цієї теми.',
+        'ja': 'このドキュメントは、このトピックに関する情報を指定していません。',
+        'de': 'Dieses Dokument enthält keine Informationen zu diesem Thema.',
+        'fr': 'Ce document ne spécifie aucune information à propos de ce sujet.',
+        'es': 'Este documento no especifica información sobre este tema.',
+        'it': 'Questo documento non specifica informazioni su questo argomento.',
+        'pt': 'Este documento não especifica informações sobre este tópico.',
+        'nl': 'Dit document vermeldt geen informatie over dit onderwerp.',
+        'pl': 'Ten dokument nie zawiera informacji na temat tej tematyki.',
+        'cs': 'Tento dokument neobsahuje informace týkající se tohoto tématu.',
+        'hu': 'Ez a dokumentum nem tartalmaz információt erről a témáról.',
+        'ro': 'Acest document nu specifică informații despre acest subiect.',
+        'tr': 'Bu belge bu konu hakkında bilgi belirtmez.',
+        'el': 'Το έγγραφο δεν περιέχει πληροφορίες σχετικά με αυτό το θέμα.',
+        'ar': 'هذا المستند لا يحدد أي معلومات حول هذا الموضوع.',
+        'zh': '本文档未指定有关此主题的信息。',
+        'ko': '이 문서는 이 주제에 관한 정보를 지정하지 않습니다.',
+        'hi': 'यह दस्तावेज़ इस विषय के बारे में कोई जानकारी नहीं देता है।',
+        'th': 'เอกสารนี้ไม่ระบุข้อมูลเกี่ยวกับหัวข้อนี้',
+        'he': 'המסמך לא מציין מידע לגבי נושא זה',
+        'en': 'This document does not specify information regarding this topic.',
+    }
+
+    _FALLBACK_LLM_DOWN = {
+        'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново скоро.',
+        'ru': 'В данный момент я не могу получить ответ от ИИ-провайдера. Попробуйте позже.',
+        'uk': 'В даний момент я не можу отримати відповідь від постачальника ШІ. Спробуйте пізніше.',
+        'ja': '現在、AIプロバイダーから回答を取得できません。暫くしてからもう一度お試しください。',
+        'de': 'Ich konnte gerade keine Antwort vom KI-Anbieter erhalten. Bitte versuchen Sie es später erneut.',
+        'fr': "Je n'ai pas pu obtenir de réponse du fournisseur d'IA pour le moment. Veuillez réessayer plus tard.",
+        'es': 'No he podido obtener una respuesta del proveedor de IA en este momento. Por favor, inténtalo de nuevo más tarde.',
+        'it': "Non sono riuscito ad ottenere una risposta dal provider di intelligenza artificiale in questo momento. Per favore, riprova più tardi.",
+        'pt': 'Não consegui obter uma resposta do provedor de IA neste momento. Por favor, tente novamente mais tarde.',
+        'nl': 'Ik kon momenteel geen antwoord krijgen van de AI-leverancier. Probeer het later opnieuw.',
+        'pl': 'W tej chwili nie mogę uzyskać odpowiedzi od dostawcy AI. Spróbuj ponownie później.',
+        'cs': 'V tuto chvíli nemohu získat odpověď od poskytovatele AI. Zkuste to znovu později.',
+        'hu': 'Jelenleg nem tudok választ kapni az AI szolgáltatótól. Próbálja meg később.',
+        'ro': 'În acest moment nu pot obține un răspuns de la furnizorul de IA. Vă rugăm să încercați din nou mai târziu.',
+        'tr': 'Şu anda yapay zekâ sağlayıcıdan yanıt alamıyorum. Lütfen daha sonra tekrar deneyin.',
+        'el': 'Δεν μπόρησα να λάβω απάντηση από τον πάροχο τεχνητής νοημοσύνης αυτήν τη στιγμή. Παρακαλώ προσπαθήστε ξανά αργότερα.',
+        'ar': 'لا أستطيع الحصول على إجابة من مزود الذكاء الاصطناعي في الوقت الحالي. يرجى المحاولة مرة أخرى لاحقًا.',
+        'zh': '暂时无法从 AI 提供商处获取答案。请稍后重试。',
+        'ko': '지금 AI 공급자로부터 답변을 얻을 수 없습니다. 나중에 다시 시도하십시오.',
+        'hi': 'मैं अभी AI प्रदादक से उत्तर नहीं पा रहा हूँ। कृपया बाद में पुनःप्रयास करें।',
+        'th': 'ฉันยังไม่สามารถได้รับคำตอบจากผู้ให้บริการปัญญาประดิษฐ์ในขณะนี้ กรุณาลองอีกครั้งในภายหลัง',
+        'he': 'לא הצלחתי לקבל תשובה מספק הבינה מלאכותית כעת. אנא נסה שוב מאוחר יותר',
+        'en': "I couldn't get an answer from the AI provider right now. Please try again in a moment.",
+    }
 
     def _fallback_answer(self, context_text: str, question: str) -> AskResponse:
         lang = self._detect_language(question)
-        if not context_text:
-            fallbacks = {
-                'bg': 'Този документ не предвижда информация относно тази тема.',
-                'ru': 'Этот документ не содержит информации по данной теме.',
-                'ja': 'このドキュメントは、このトピックに関する情報を指定していません。',
-                'en': 'This document does not specify information regarding this topic.',
-            }
-        else:
-            fallbacks = {
-                'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново скоро.',
-                'ru': 'В данный момент я не могу получить ответ от ИИ-провайдера. Попробуйте позже.',
-                'ja': '現在、AIプロバイダーから回答を取得できません。暫くしてからもう一度お試しください。',
-                'en': 'I couldn\'t get an answer from the AI provider right now. Please try again in a moment.',
-            }
+        fallbacks = self._FALLBACK_NO_DOCS if not context_text else self._FALLBACK_LLM_DOWN
         answer = fallbacks.get(lang, fallbacks['en'])
         return AskResponse(answer=answer, evidence_quote=None)
 
