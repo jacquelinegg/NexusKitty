@@ -70,7 +70,6 @@ html {
 body {
   width: 540px;
   min-width: 320px;
-  min-height: 720px;
 
   color: var(--ink);
 
@@ -1583,8 +1582,11 @@ button {
 
   border-bottom: 1px solid var(--border);
 
+  cursor: pointer;
+
   transition:
-    background 0.18s ease;
+    background 0.18s ease,
+    transform 0.15s ease;
 }
 
 .history-item:first-child {
@@ -1593,6 +1595,10 @@ button {
 
 .history-item:hover {
   background: var(--paper-2);
+}
+
+.history-item:active {
+  transform: scale(0.99);
 }
 
 .history-domain {

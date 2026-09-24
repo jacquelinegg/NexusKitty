@@ -542,12 +542,12 @@ function switchTab(tabName) {
 async function loadHistory() {
   try {
     const history = await request('/api/history?limit=5');
-    elements.history.innerHTML = history.length ? history.map((item) => {
+    elements.history.innerHTML = history.length ? history.map((item, index) => {
       const score = Number(item.safety_score) || 0;
       const label = item.safety_prediction || safetyLabel(score);
       const riskClass = score >= 65 ? 'safe' : score >= 40 ? 'warning' : 'danger';
       return `
-      <article class="history-item">
+      <article class="history-item" data-index="${index}">
         <div class="history-domain">${escapeHtml(item.domain || 'Unknown domain')}</div>
         <div class="history-score">
           <span class="history-score-badge ${riskClass}">${escapeHtml(label)}</span>
@@ -557,6 +557,17 @@ async function loadHistory() {
       </article>
       `;
     }).join('') : '<div class="history-item">No scans yet.</div>';
+
+    // Attach click handlers so selecting a history entry shows its analysis
+    // in the main panel, like a promotional sweep through previous scans.
+    elements.history.querySelectorAll('.history-item').forEach((node) => {
+      node.addEventListener('click', () => {
+        const index = Number(node.dataset.index);
+        if (Number.isNaN(index) || !history[index]) return;
+        renderAnalysis(history[index]);
+        switchTab('analysis');
+      });
+    });
   } catch (error) {
     elements.history.innerHTML = '<div class="history-item">History is unavailable.</div>';
   }
