@@ -253,14 +253,78 @@ function escapeHtml(value) {
 function looksLikeLegalDocument(url, text) {
   const source = `${url} ${text}`.toLowerCase();
   const markers = [
+    // English
     'terms of service', 'terms and conditions', 'terms & conditions',
     'privacy policy', 'cookie policy', 'cookie settings', 'personal data',
     'data processing', 'consent', 'third parties', 'third-party',
-    'data retention', 'arbitration', 'governing law', 'refund policy', 'subscription'
+    'data retention', 'arbitration', 'governing law', 'refund policy', 'subscription',
+    // Bulgarian
+    'правила за поверителност', 'политика по поверителност', 'бисквитки',
+    'съгласие', 'лични данни', 'обработка на данни', 'трети страни',
+    'правила и условия', 'арбитраж', 'данъчно задържане', 'абонамент',
+    // Russian
+    'политика конфиденциальности', 'файлы cookie', 'согласие',
+    'личные данные', 'обработка данных', 'третьи стороны',
+    'условия', 'арбитраж', 'подписка', 'договор', ' возврат',
+    // Ukrainian
+    'політика конфіденційності', ' файли cookie', 'згода',
+    'особисті дані', 'обробка даних', 'треті сторони',
+    'умови', 'арбітраж', 'підписка',
+    // German
+    'datenschutz', 'cookies', 'einwilligung', 'nutzungsbedingungen',
+    'vertrag', 'widerruf', 'abonnement',
+    // French
+    'politique de confidentialité', 'cookies', 'consentement',
+    'conditions générales', 'données personnelles', 'abonnement',
+    // Spanish
+    'política de privacidad', 'cookies', 'consentimiento',
+    'términos y condiciones', 'datos personales', 'suscripción',
+    // Italian
+    'politica sulla privacy', 'cookie', 'consenso',
+    'condizioni generali', 'dati personali', 'abbonamento',
+    // Portuguese
+    'política de privacidade', 'cookies', 'consentimento',
+    'condições gerais', 'dados pessoais', 'assinatura',
+    // Dutch
+    'privacybeleid', 'cookies', 'toestemming',
+    'gebruiksvoorwaarden', 'persoonsgegevens', 'abonnement',
+    // Polish
+    'polityka prywatności', 'ciasteczka', 'zgoda',
+    'warunki korzystania', 'dane osobowe', 'abonament',
+    // Czech
+    'zásady ochrany osobních údajů', 'cookies', 'souhlas',
+    'podmínky použití', 'osobní údaje',
+    // Hungarian
+    'adatvédelmi nyilatkozat', 'sütik', 'hozzájárulás',
+    'használati feltételek', 'személyes adatok', 'előfizetés',
+    // Romanian
+    'politica de confidențialitate', 'cookie-uri', 'consimțământ',
+    'condiții generale', 'date personale', 'abonament',
+    // Turkish
+    'kişisel verilerin korunması', 'çerezler', 'onay',
+    'kullanım şartları', 'abone olma',
+    // Greek
+    'πολιτική απορρήου', 'cookie', 'συγκατάθεση',
+    'όροι χρήσης', 'προσωπικά δεδομένα',
+    // Arabic
+    'سياسة الخصوصية', 'ملفات ارتساعية', 'موافقة',
+    'شروط الاستخدام', 'بيانات شخصية',
+    // Japanese
+    'プライバシーポリシー', 'クッキー', '同意', '利用規約', '個人データ',
+    // Korean
+    '개인정보 처리방침', '쿠키', '동의', '이용 약관',
+    // Chinese (Simplified)
+    '隐私政策', 'cookie', '同意', '使用条款', '个人信息',
+    // Hindi
+    'गोपनीयता नीति', 'कूकीज', 'सहमति', 'उपयोग conditions', 'व्यक्तिगत डेटा',
+    // Thai
+    'นโยบายความเป็นส่วนตัว', 'คุกกี้', 'การยินยอม', 'ข้อกำหนดการใช้',
+    // Hebrew
+    'מדיניות פרטיות', 'עוגיות', 'הסכם', 'תנאי שירות',
   ];
   const matches = markers.filter((marker) => source.includes(marker)).length;
-  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy)/i.test(url);
-  return legalUrl || matches >= 3;
+  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy|политика|бисквитки|съгласие|правила|datenschutz|politique|privacidad|confidențialitate|kişisel|προσωπικά|سياسة|使用|개인|गोपनीयता|ความเป็น|מדיניות)/i.test(url);
+  return legalUrl || matches >= 2;
 }
 
 async function request(path, options = {}) {

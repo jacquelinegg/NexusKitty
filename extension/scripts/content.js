@@ -12,9 +12,49 @@ const CACHE_TTL = 24 * 60 * 60 * 1000;
 const HUD_UPDATE_DELAY = 350;
 const BANNER_BUDGET = 1500; // max chars for banner/local text, so linked policies still fit
 const CACHE_PREFIX = 'nk_cache_v4_';
-const LEGAL_PAGE_REGEX = /(terms|condition|privacy|policy|legal|cookie|gdpr)/i;
-const LEGAL_URL_REGEX =
-  /(terms|condition|privacy|cookie|legal|policy|policies|rights|preference|gdpr|data-protection|data-privacy)/i;
+const LEGAL_URL_KEYWORDS = [
+  // English
+  'terms', 'conditions', 'privacy', 'cookie', 'policy', 'legal', 'gdpr',
+  // German
+  'datenschutz', 'einwilligung', 'nutzungs',
+  // French
+  'politique', 'consentement',
+  // Spanish
+  'privacidad', 'consentimiento', 'condiciones',
+  // Portuguese
+  'privacidade', 'consentimento', 'condições',
+  // Bulgarian
+  'правила', 'поверителност', 'бисквитки', 'съгласие',
+  // Russian
+  'правила', 'политика', 'согласие',
+  // Ukrainian
+  'політика', 'згода',
+  // Turkish
+  'kişisel', 'çerez', 'onay', 'şartları',
+  // Arabic
+  'سياسة', 'خصوصية', 'موافقة',
+  // Japanese
+  'プライバシー', '同意', '利用規約',
+  // Korean
+  '개인정보', '동의', '이용',
+  // Chinese
+  '隐私', '同意', '使用条款',
+  // Hindi
+  'गोपनीयता', 'सहमति',
+  // Thai
+  'ความเป็น', 'การยินยอม',
+  // Hebrew
+  'פרטיות', 'הסכם',
+  // Greek
+  'προσωπικά', 'συγκατάθεση',
+  // Polish
+  'prywatność', 'ciasteczka', 'zgoda',
+  // Czech
+  'osobní', 'souhlas', 'podmínky',
+];
+
+const LEGAL_PAGE_REGEX = new RegExp(LEGAL_URL_KEYWORDS.join('|'), 'i');
+const LEGAL_URL_REGEX = new RegExp(LEGAL_URL_KEYWORDS.join('|'), 'i');
 
 /*
  * Selectors for cookie-consent overlays, modal dialogs, and CMP widgets
