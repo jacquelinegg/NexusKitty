@@ -28,6 +28,11 @@ COOKIE-SPECIFIC CHECKS:
 - Treat a cookie banner or consent notice as part of the document when it contains processing terms.
 - BREAKDOWN USER CHOICE: Differentiate what data is processed when accepting only "Essential/Necessary" vs accepting "All/Optional" cookies (e.g. cross-service consent, ad pixels, analytics).
 
+CONSENT POPUP PRIORITY:
+- If the input starts with "[Active Consent Popup / Cookie Banner]", that text is the PRIMARY document. Analyze it first, even if it is only 150-300 characters long.
+- Short consent text is valid legal content — do NOT dismiss it as a "regular webpage".
+- If the consent text is very brief, the page context (if provided) supplements the analysis but does not replace the consent terms.
+
 EXTRACTION FIELDS:
 - `declared_third_party_sharing`: set true when the policy permits or describes third-party sharing; set false only when it clearly claims no third-party sharing or no trackers; otherwise use null.
 - `privacy_email`: extract an explicit DPO, privacy, data protection, or legal contact email when present; otherwise null.

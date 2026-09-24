@@ -16,6 +16,38 @@ const LEGAL_PAGE_REGEX = /(terms|condition|privacy|policy|legal|cookie|gdpr)/i;
 const LEGAL_URL_REGEX =
   /(terms|condition|privacy|cookie|legal|policy|policies|rights|preference|gdpr|data-protection|data-privacy)/i;
 
+/*
+ * Selectors for cookie-consent overlays, modal dialogs, and CMP widgets
+ * that should ALWAYS be excluded from the scraped document text.
+ */
+const CMP_OVERLAY_SELECTORS = [
+  '[id*="onetrust" i]',
+  '[class*="onetrust" i]',
+  '[id*="didomi" i]',
+  '[class*="didomi" i]',
+  '[id*="cookielaw" i]',
+  '[class*="cookielaw" i]',
+  '[id*="cmp" i]',
+  '[class*="cmp" i]',
+  '[id*="cookie-banner" i]',
+  '[class*="cookie-banner" i]',
+  '[id*="consent-banner" i]',
+  '[class*="consent-banner" i]',
+  '[id*="cookie-wall" i]',
+  '[class*="cookie-wall" i]',
+  '[id*="modal-overlay" i]',
+  '[class*="modal-overlay" i]',
+  '[class*="overlay" i]',
+  '[class*="modal" i]',
+  '[class*="dialog" i]',
+  '[class*="popup" i]',
+  '[id*="modal" i]',
+  '[id*="dialog" i]',
+  '[id*="popup" i]',
+  '[data-testid*="cookie" i]',
+  '[data-testid*="consent" i]'
+];
+
 /* =========================================================
    RUNTIME STATE
    ========================================================= */
@@ -48,8 +80,26 @@ function getNodeText(node) {
     return '';
   }
 
-  // textContent is much cheaper than innerText (no layout calculation).
   return cleanText(node.textContent || node.innerText || '');
+}
+
+/*
+ * Clone a node, remove every CMP / overlay / modal element, and return
+ * the cleaned text. This prevents cookie banners (OneTrust, Didomi, etc.)
+ * from polluting the scraped document text.
+ */
+function getTextExcludingOverlays(node) {
+  if (!node) {
+    return '';
+  }
+
+  const clone = node.cloneNode(true);
+
+  clone
+    .querySelectorAll(CMP_OVERLAY_SELECTORS.join(', '))
+    .forEach((el) => el.remove());
+
+  return getNodeText(clone);
 }
 
 /* =========================================================
@@ -195,7 +245,7 @@ function getMainDocumentText() {
       continue;
     }
 
-    const text = getNodeText(node);
+    const text = getTextExcludingOverlays(node);
 
     if (text.length >= 400) {
       return text;
@@ -304,19 +354,92 @@ async function fetchLegalPageText(url) {
 }
 
 /* =========================================================
-   MAIN TEXT EXTRACTION
-   ========================================================= */
+    MAIN TEXT EXTRACTION
+    ========================================================= */
+
+/*
+  * Detect an active consent / CMP overlay or modal that is currently
+  * visible on the page. Returns { node, text } or null.
+  * The consent popup IS the primary document the user wants to analyze.
+  */
+function getActiveConsentPopup() {
+  const activeSelectors = [
+    ...CMP_OVERLAY_SELECTORS,
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '[aria-modal="true"]'
+  ];
+
+  const elements = document.querySelectorAll(activeSelectors.join(', '));
+
+  for (const el of elements) {
+    if (!isVisible(el)) {
+      continue;
+    }
+
+    const text = getNodeText(el);
+
+    // Must contain consent-related keywords to qualify as a consent popup
+    if (
+      text.length >= 50 &&
+      /(cookie|consent|privacy|policy|gdpr|personal data|accept|agree|close|reject|manage)/i.test(text)
+    ) {
+      return { node: el, text: text.slice(0, BANNER_BUDGET) };
+    }
+  }
+
+  // Fall back to structural consent containers
+  const containers = getConsentContainers();
+  if (containers.length > 0) {
+    return {
+      node: containers[0].node,
+      text: containers[0].text.slice(0, BANNER_BUDGET)
+    };
+  }
+
+  return null;
+}
 
 async function extractMainText() {
+  /*
+    * PRIORITY 1: Active consent/CMP overlay or modal dialog.
+    * The consent popup IS the primary document the user wants to analyze.
+    */
+
+  const activePopup = getActiveConsentPopup();
+
+  if (activePopup) {
+    const popupText = activePopup.text;
+
+    // Treat consent text as valid legal content even when short (150+ chars).
+    if (popupText.length >= 150) {
+      // If popup text is brief (< 400 chars), combine with page context
+      // so the backend has full visibility into what the user is agreeing to.
+      if (popupText.length < 400) {
+        const pageText = getMainDocumentText();
+        if (pageText && pageText.length > 100) {
+          return (
+            '[Active Consent Popup / Cookie Banner]\n' +
+            popupText + '\n\n' +
+            '[Page context]\n' +
+            pageText.slice(0, BANNER_BUDGET) + '\n\n'
+          ).slice(0, MAX_TEXT_LENGTH);
+        }
+      }
+
+      return ('[Active Consent Popup / Cookie Banner]\n' + popupText).slice(0, MAX_TEXT_LENGTH);
+    }
+  }
+
+  /*
+    * 2. Fallback to structured consent detection + main document.
+    */
+
   const structuralConsent = getConsentContainers();
 
   const extractedBannerText = structuralConsent.length
     ? structuralConsent[0].text.slice(0, BANNER_BUDGET)
     : '';
-
-  /*
-   * 1. Legal page detection.
-   */
 
   const documentText = getMainDocumentText();
 
