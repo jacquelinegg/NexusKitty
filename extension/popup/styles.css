@@ -669,25 +669,38 @@ button {
 
 .chat-messages {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
     min-height: 350px;
     max-height: 400px;
-  padding: 9px 11px;
-  border: 1px solid #705b45;
-  color: var(--cream);
-  font-size: 0.73rem;
-  line-height: 1.5;
+    padding: 12px;
+    overflow-y: auto;
+    border: 1px solid #705b45;
+    color: var(--cream);
+    font-size: 0.73rem;
+    line-height: 1.5;
+}
+
+.chat-message {
+    max-width: 80%;
+    align-self: flex-start;
+    padding: 10px 12px;
+    border-radius: 14px 14px 14px 5px;
+    border: 1px solid var(--line);
+    background: var(--panel-soft);
+    word-wrap: break-word;
 }
 
 .chat-message.user {
-  align-self: flex-end;
-  border-color: var(--red);
-  background: var(--red-dark);
+    align-self: flex-end;
+    border-color: var(--red);
+    background: var(--red-dark);
+    border-radius: 14px 5px 14px 14px;
 }
 
 .chat-message.bot {
-  align-self: flex-start;
-  border-left: 3px solid var(--teal);
-  background: var(--panel-soft);
+    align-self: flex-start;
+    border-left: 3px solid var(--teal);
 }
 
 .chat-form {
