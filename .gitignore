@@ -18,6 +18,8 @@ ENV/
 # Environment variables
 .env
 .env.*
+!.env.development
+!.env.production
 
 # IDE
 .vscode/

@@ -1,5 +1,3 @@
-const API_BASE = 'https://nexuskitty.onrender.com';
-
 const state = {
   url: '',
   text: '',
