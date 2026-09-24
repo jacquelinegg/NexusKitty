@@ -251,6 +251,62 @@ function escapeHtml(value) {
   }[character]));
 }
 
+function detectLanguage(text) {
+  if (/\u3040-\u30FF/.test(text)) return 'ja';
+  if (/[\uAC00-\uD7AF]/.test(text)) return 'ko';
+  if (/[\u4E00-\u9FFF]/.test(text)) return 'zh';
+  if (/[\u0600-\u06FF]/.test(text)) return 'ar';
+  if (/[\u0590-\u05FF]/.test(text)) return 'he';
+  if (/[\u0370-\u03FF]/.test(text)) return 'el';
+  if (/[\u0900-\u097F]/.test(text)) return 'hi';
+  if (/[\u0E00-\u0E7F]/.test(text)) return 'th';
+  if (/[\u0400-\u04FF]/.test(text)) {
+    if (/[іїєґ]/.test(text)) return 'uk';
+    if (/[ыэё]/.test(text)) return 'ru';
+    return 'bg';
+  }
+  return 'en';
+}
+
+const ERROR_MESSAGES = {
+  bg: 'Възникна грешка при връзката с модела. Моля, опитайте пак.',
+  ru: 'Возникла ошибка при подключении к модели. Попробуйте позже.',
+  uk: 'Виникла помилка під час підключення до моделі. Спробуйте пізніше.',
+  ja: 'モデルへの接続中にエラーが発生しました。後でもう一度試してください。',
+  en: 'An error occurred while connecting to the AI model. Please try again shortly.',
+};
+
+const UI_ERRORS = {
+  bg: {
+    noText: 'Не е намерен четим текст за правен документ на тази страница. Отворете Terms, Conditions, Privacy или Cookies и опитайте отново.',
+    notLegal: 'Изглежда като обикновена уеб страница, а не правен документ. Отворете Terms, Privacy или Cookie Policy страницата и опитайте отново.',
+    backendDown: 'Бекендът е недостъпен. Проверете https://nexuskitty.onrender.com и презаредете разширението.',
+    disabled: 'NexusKitty е изключен за',
+  },
+  en: {
+    noText: 'No readable legal document text found on this page. Open Terms, Conditions, Privacy, or Cookies and try again.',
+    notLegal: 'This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.',
+    backendDown: 'The backend is unavailable. Check https://nexuskitty.onrender.com and reload the extension.',
+    disabled: 'NexusKitty is disabled for',
+  },
+};
+
+function getUiLanguage() {
+  const lang = (navigator.language || 'en').split('-')[0].toLowerCase();
+  if (Object.keys(UI_ERRORS).includes(lang)) return lang;
+  return 'en';
+}
+
+function getUiError(key) {
+  const lang = getUiLanguage();
+  return UI_ERRORS[lang][key] || UI_ERRORS.en[key];
+}
+
+function getErrorMessage(text) {
+  const lang = detectLanguage(text);
+  return ERROR_MESSAGES[lang] || ERROR_MESSAGES.en;
+}
+
 function looksLikeLegalDocument(url, text) {
   const source = `${url} ${text}`.toLowerCase();
   const markers = [
@@ -410,7 +466,7 @@ async function initialize() {
 
       if (disabledDomains.includes(domain)) {
         state.isDisabled = true;
-        showError(`NexusKitty е изключен за ${domain}.`, false, true);
+        showError(`${getUiError('disabled')} ${domain}.`, false, true);
         updateBadgeAlert(false);
         return;
       }
@@ -423,7 +479,7 @@ async function initialize() {
     state.legalSurface = page.legal_surface === true;
 
     if (state.text.trim().length < 30) {
-      showError('No readable legal document text found on this page. Open Terms, Conditions, Privacy, or Cookies and try again.');
+      showError(getUiError('noText'));
       return;
     }
 
@@ -437,7 +493,7 @@ async function initialize() {
         });
 
         if (!classifyResp.is_legal) {
-          showError('This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.', true);
+          showError(getUiError('notLegal'), true);
           return;
         }
       } catch {
@@ -449,7 +505,7 @@ async function initialize() {
     await analyzeCurrentPage();
   } catch (error) {
     setStatus(false);
-    showError('The backend is unavailable. Check https://nexuskitty.onrender.com and reload the extension.');
+    showError(getUiError('backendDown'));
     console.error('NexusKitty initialization failed:', error);
   }
 }
@@ -563,7 +619,7 @@ function attachEvents() {
       appendChat('bot', answer.answer || 'No answer returned.');
     } catch (error) {
       console.error('Ask Kitty failed:', error);
-      appendChat('bot', 'Kitty има проблем с връзката с модела. Моля, опитайте пак через няколко секунди.');
+      appendChat('bot', getErrorMessage(question));
     } finally {
       elements.send.disabled = false;
     }
