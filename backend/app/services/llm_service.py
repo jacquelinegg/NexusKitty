@@ -333,29 +333,42 @@ class LLMService:
         )
 
     def _detect_language(self, text: str) -> str:
-        """Detect language from character set (simple heuristic)."""
-        if re.search(r'[А-Яа-яЁё]', text):
-            return 'bg'
-        if re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text):
+        """Detect language using Unicode script ranges (covers all major scripts)."""
+        if re.search(r'[\u3040-\u30FF\u309B-\u30FC]', text):
             return 'ja'
+        if re.search(r'[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7FF]', text):
+            return 'ko'
+        if re.search(r'[\u4E00-\u9FFF\u3400-\u4DBF]', text):
+            return 'zh'
+        if re.search(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFEFF]', text):
+            return 'ar'
+        if re.search(r'[\u0590-\u05FF]', text):
+            return 'he'
+        if re.search(r'[\u0370-\u03FF]', text):
+            return 'el'
+        if re.search(r'[\u0900-\u097F]', text):
+            return 'hi'
+        if re.search(r'[\u0E00-\u0E7F]', text):
+            return 'th'
+        if re.search(r'[\u0400-\u04FF]', text):
+            return 'bg'
         return 'en'
 
     def _fallback_answer(self, context_text: str, question: str) -> AskResponse:
         lang = self._detect_language(question)
         if not context_text:
-            answers = {
+            fallbacks = {
                 'bg': 'Този документ не предвижда информация относно тази тема.',
                 'ja': 'このドキュメントは、このトピックに関する情報を指定していません。',
                 'en': 'This document does not specify information regarding this topic.',
             }
-            answer = answers.get(lang, answers['en'])
         else:
-            answers = {
-                'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново в ским момент.',
+            fallbacks = {
+                'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново скоро.',
                 'ja': '現在、AIプロバイダーから回答を取得できません。暫くしてからもう一度お試しください。',
                 'en': 'I couldn\'t get an answer from the AI provider right now. Please try again in a moment.',
             }
-            answer = answers.get(lang, answers['en'])
+        answer = fallbacks.get(lang, fallbacks['en'])
         return AskResponse(answer=answer, evidence_quote=None)
 
     # ------------------------------------------------------------------
