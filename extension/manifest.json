@@ -19,7 +19,13 @@
   },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "NexusKitty"
+    "default_title": "NexusKitty",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "128": "icons/icon128.png"
   },
   "content_scripts": [
     {
