@@ -555,7 +555,8 @@ async function loadHistory() {
         </div>
         <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 160))}</div>
       </article>
-    `).join('') : '<div class="history-item">No scans yet.</div>';
+      `;
+    }).join('') : '<div class="history-item">No scans yet.</div>';
   } catch (error) {
     elements.history.innerHTML = '<div class="history-item">History is unavailable.</div>';
   }
