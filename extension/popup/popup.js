@@ -8,6 +8,7 @@ const state = {
   analysis: null,
   filter: 'all',
   isDisabled: false,
+  chatHistory: [],
 };
 
 const elements = {
@@ -503,6 +504,12 @@ function appendChat(role, text) {
   message.textContent = text;
   elements.chat.appendChild(message);
   elements.chat.scrollTop = elements.chat.scrollHeight;
+
+  // Track chat history for context
+  state.chatHistory.push({
+    sender: role === 'bot' ? 'assistant' : 'user',
+    text,
+  });
 }
 
 function attachEvents() {
@@ -546,12 +553,17 @@ function attachEvents() {
     try {
       const answer = await request('/api/ask', {
         method: 'POST',
-        body: JSON.stringify({ url: state.url, question, context_text: state.text }),
+        body: JSON.stringify({
+          url: state.url,
+          question,
+          context_text: state.text,
+          history: state.chatHistory,
+        }),
       });
       appendChat('bot', answer.answer || 'No answer returned.');
     } catch (error) {
       console.error('Ask Kitty failed:', error);
-      appendChat('bot', 'Kitty could not get an answer. Please try again.');
+      appendChat('bot', 'Kitty има проблем с връзката с модела. Моля, опитайте пак через няколко секунди.');
     } finally {
       elements.send.disabled = false;
     }

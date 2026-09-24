@@ -87,6 +87,7 @@ class AskRequest(BaseModel):
     url: str
     question: str
     context_text: str
+    history: Optional[list[dict]] = None
 
 
 class AskResponse(BaseModel):

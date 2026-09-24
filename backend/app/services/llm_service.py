@@ -15,7 +15,7 @@ except ImportError:
 
 from ..prompts import (
     TOS_ANALYSIS_SYSTEM_PROMPT,
-    ASK_NEXUSKITTY_SYSTEM_PROMPT,
+    ASK_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     CLASSIFY_SYSTEM_PROMPT,
 )
@@ -82,14 +82,23 @@ class LLMService:
                 return text[start:end].strip()
         return ""
 
-    def _ask_messages(self, context_text: str, question: str) -> list[dict]:
-        return [
-            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{ASK_NEXUSKITTY_SYSTEM_PROMPT}"},
-            {
-                "role": "user",
-                "content": f"DOCUMENT:\n{context_text}\n\nQUESTION:\n{question}",
-            },
+    def _ask_messages(self, context_text: str, question: str, history: list = None) -> list[dict]:
+        messages = [
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{ASK_SYSTEM_PROMPT}"},
         ]
+
+        # Inject document context as a system message
+        context_msg = f"DOCUMENT CONTEXT:\n{context_text}\n---"
+        messages.append({"role": "system", "content": context_msg})
+
+        # Add chat history if provided
+        if history:
+            for msg in history:
+                role = "user" if msg.get("sender") == "user" else "assistant"
+                messages.append({"role": role, "content": msg.get("text", "")})
+
+        messages.append({"role": "user", "content": question})
+        return messages
 
     # ------------------------------------------------------------------
     # Groq (synchronous SDK calls; always run through asyncio.to_thread)
@@ -140,8 +149,8 @@ class LLMService:
         result = ToSAnalysisResult.model_validate_json(completion.choices[0].message.content)
         return self._finalize(result, "groq")
 
-    def _answer_with_groq(self, context_text: str, question: str) -> AskResponse:
-        messages = self._ask_messages(context_text, question)
+    def _answer_with_groq(self, context_text: str, question: str, history: list = None) -> AskResponse:
+        messages = self._ask_messages(context_text, question, history)
         extra = {"reasoning_effort": GROQ_REASONING_EFFORT}
 
         # 1) Structured output
@@ -195,15 +204,17 @@ class LLMService:
             logger.exception("Gemini analysis failed")
             return None
 
-    def _answer_with_gemini(self, context_text: str, question: str) -> Optional[AskResponse]:
+    def _answer_with_gemini(self, context_text: str, question: str, history: list = None) -> Optional[AskResponse]:
         if not self.gemini_client or not types:
             return None
         try:
+            messages = self._ask_messages(context_text, question, history)
+            contents_text = "\n".join(f"[{m['role']}] {m['content']}" for m in messages)
             response = self.gemini_client.models.generate_content(
                 model=self.gemini_model,
-                contents=f"DOCUMENT:\n{context_text}\n\nQUESTION:\n{question}",
+                contents=contents_text,
                 config=types.GenerateContentConfig(
-                    system_instruction=f"{SYSTEM_PROMPT}\n\n{ASK_NEXUSKITTY_SYSTEM_PROMPT}",
+                    system_instruction=f"{SYSTEM_PROMPT}\n\n{ASK_SYSTEM_PROMPT}",
                     response_mime_type="application/json",
                     response_schema=AskResponse,
                     temperature=0,
@@ -445,11 +456,11 @@ class LLMService:
 
         return self._fallback_analysis(text, reason)
 
-    async def ask_question(self, context_text: str, question: str) -> AskResponse:
+    async def ask_question(self, context_text: str, question: str, history: list = None) -> AskResponse:
         """Groq first, then Gemini, then a safe fallback. Never raises."""
         try:
             return await asyncio.to_thread(
-                self._answer_with_groq, context_text, question
+                self._answer_with_groq, context_text, question, history
             )
         except Exception as e:
             logger.warning(
@@ -457,7 +468,7 @@ class LLMService:
             )
 
         gemini_answer = await asyncio.to_thread(
-            self._answer_with_gemini, context_text, question
+            self._answer_with_gemini, context_text, question, history
         )
         if gemini_answer:
             return gemini_answer

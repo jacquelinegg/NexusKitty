@@ -548,6 +548,7 @@ async def ask_question(
             await llm_service.ask_question(
                 request.context_text,
                 request.question,
+                request.history,
             )
         )
 
