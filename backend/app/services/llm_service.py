@@ -13,7 +13,7 @@ except ImportError:
     genai = None
     types = None
 
-from ..prompts import TOS_ANALYSIS_SYSTEM_PROMPT, ASK_NEXUSKITTY_SYSTEM_PROMPT
+from ..prompts import TOS_ANALYSIS_SYSTEM_PROMPT, ASK_NEXUSKITTY_SYSTEM_PROMPT, SYSTEM_PROMPT
 from ..schemas import (
     ToSAnalysisResult,
     AskResponse,
@@ -78,7 +78,7 @@ class LLMService:
 
     def _ask_messages(self, context_text: str, question: str) -> list[dict]:
         return [
-            {"role": "system", "content": ASK_NEXUSKITTY_SYSTEM_PROMPT},
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{ASK_NEXUSKITTY_SYSTEM_PROMPT}"},
             {
                 "role": "user",
                 "content": f"DOCUMENT:\n{context_text}\n\nQUESTION:\n{question}",
@@ -197,7 +197,7 @@ class LLMService:
                 model=self.gemini_model,
                 contents=f"DOCUMENT:\n{context_text}\n\nQUESTION:\n{question}",
                 config=types.GenerateContentConfig(
-                    system_instruction=ASK_NEXUSKITTY_SYSTEM_PROMPT,
+                    system_instruction=f"{SYSTEM_PROMPT}\n\n{ASK_NEXUSKITTY_SYSTEM_PROMPT}",
                     response_mime_type="application/json",
                     response_schema=AskResponse,
                     temperature=0,
@@ -332,14 +332,30 @@ class LLMService:
             cookie_breakdown=None,
         )
 
+    def _detect_language(self, text: str) -> str:
+        """Detect language from character set (simple heuristic)."""
+        if re.search(r'[А-Яа-яЁё]', text):
+            return 'bg'
+        if re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text):
+            return 'ja'
+        return 'en'
+
     def _fallback_answer(self, context_text: str, question: str) -> AskResponse:
+        lang = self._detect_language(question)
         if not context_text:
-            answer = "This document does not specify information regarding this topic."
+            answers = {
+                'bg': 'Този документ не предвижда информация относно тази тема.',
+                'ja': 'このドキュメントは、このトピックに関する情報を指定していません。',
+                'en': 'This document does not specify information regarding this topic.',
+            }
+            answer = answers.get(lang, answers['en'])
         else:
-            answer = (
-                "I couldn't get an answer from the AI provider right now. "
-                "Please try again in a moment."
-            )
+            answers = {
+                'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново в ским момент.',
+                'ja': '現在、AIプロバイダーから回答を取得できません。暫くしてからもう一度お試しください。',
+                'en': 'I couldn\'t get an answer from the AI provider right now. Please try again in a moment.',
+            }
+            answer = answers.get(lang, answers['en'])
         return AskResponse(answer=answer, evidence_quote=None)
 
     # ------------------------------------------------------------------
