@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import logging
 import re
@@ -88,14 +88,21 @@ class LLMService:
         ]
 
         # Inject document context as a system message
-        context_msg = f"DOCUMENT CONTEXT:\n{context_text}\n---"
-        messages.append({"role": "system", "content": context_msg})
+        if context_text:
+            context_msg = f"DOCUMENT CONTEXT:\n{context_text}"
+            messages.append({"role": "system", "content": context_msg})
 
-        # Add chat history if provided
+        # Append conversation history so follow-up questions keep context.
+        # Normalize both key naming conventions (sender/role, text/content).
         if history:
-            for msg in history:
-                role = "user" if msg.get("sender") == "user" else "assistant"
-                messages.append({"role": role, "content": msg.get("text", "")})
+            for h in history:
+                sender = h.get("sender")
+                role = h.get("role")
+                is_user = sender == "user" or role == "user"
+                normalized_role = "user" if is_user else "assistant"
+                content = h.get("text") or h.get("content") or ""
+                if content:
+                    messages.append({"role": normalized_role, "content": content})
 
         messages.append({"role": "user", "content": question})
         return messages

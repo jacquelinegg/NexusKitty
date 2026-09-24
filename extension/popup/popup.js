@@ -561,7 +561,8 @@ function appendChat(role, text) {
   elements.chat.appendChild(message);
   elements.chat.scrollTop = elements.chat.scrollHeight;
 
-  // Track chat history for context
+  // Track chat history for context — keep the full conversation alive
+  // so follow-up questions can reference earlier messages.
   state.chatHistory.push({
     sender: role === 'bot' ? 'assistant' : 'user',
     text,

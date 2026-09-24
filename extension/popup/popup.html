@@ -2,105 +2,357 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
     <title>NexusKitty</title>
+
     <link rel="stylesheet" href="styles.css" />
   </head>
+
   <body>
     <div class="app-shell">
+
       <header class="topbar">
         <div class="brand-wrap">
           <div class="brand-mark">N</div>
+
           <div>
-            <div class="brand-title">NexusKitty</div>
-            <div class="brand-subtitle">Wanted // Legal intelligence</div>
+            <div class="brand-title">
+              NexusKitty
+            </div>
+
+            <div class="brand-subtitle">
+              Wanted // Legal intelligence
+            </div>
           </div>
         </div>
-        <span id="statusBadge" class="status-badge offline">Offline</span>
+
+        <span
+          id="statusBadge"
+          class="status-badge offline"
+        >
+          Offline
+        </span>
       </header>
 
-      <nav class="tabbar" aria-label="Main navigation">
-        <button class="tab-button active" data-tab="analysis">🔍 Analysis</button>
-        <button class="tab-button" data-tab="history">📜 History</button>
-        <button class="tab-button" data-tab="chat">💬 Ask Kitty</button>
+
+      <nav
+        class="tabbar"
+        aria-label="Main navigation"
+      >
+        <button
+          class="tab-button active"
+          data-tab="analysis"
+          type="button"
+        >
+          🔍 Analysis
+        </button>
+
+        <button
+          class="tab-button"
+          data-tab="history"
+          type="button"
+        >
+          📜 History
+        </button>
+
+        <button
+          class="tab-button"
+          data-tab="chat"
+          type="button"
+        >
+          💬 Ask Kitty
+        </button>
       </nav>
 
+
       <main class="content">
-        <section id="panel-analysis" class="panel active">
-          <div id="loadingState" class="loading-panel">
+
+        <!-- =================================================
+             ANALYSIS
+             ================================================= -->
+
+        <section
+          id="panel-analysis"
+          class="panel active"
+        >
+
+          <div
+            id="loadingState"
+            class="loading-panel"
+          >
             <div class="spinner"></div>
-            <p>Kitty is reading the fine print...</p>
+
+            <p>
+              Kitty is reading the fine print...
+            </p>
           </div>
 
-          <div id="analysisState" class="analysis-state hidden">
-            <div class="score-panel risk-overview-panel">
+
+          <div
+            id="analysisState"
+            class="analysis-state hidden"
+          >
+
+            <!-- Risk overview -->
+
+            <div
+              class="score-panel risk-overview-panel"
+            >
+
               <div class="score-header">
-                <span>Risk overview</span>
-                <span id="riskPill" class="risk-pill neutral">Review</span>
+                <span>
+                  Risk overview
+                </span>
+
+                <span
+                  id="riskPill"
+                  class="risk-pill neutral"
+                >
+                  Review
+                </span>
               </div>
-              <div id="issueCount" class="issue-count">-- issues worth reviewing</div>
-              <div id="issueBreakdown" class="issue-breakdown"></div>
+
+
+              <div
+                id="issueCount"
+                class="issue-count"
+              >
+                -- issues worth reviewing
+              </div>
+
+
+              <div
+                id="issueBreakdown"
+                class="issue-breakdown"
+              ></div>
+
+
               <div class="risk-why">
-                <strong>Why you're seeing this:</strong>
-                <span id="riskWhy">The document is being checked for clauses with practical implications.</span>
+                <strong>
+                  Why you're seeing this:
+                </strong>
+
+                <span id="riskWhy">
+                  The document is being checked
+                  for clauses with practical implications.
+                </span>
               </div>
+
             </div>
+
+
+            <!-- Summary -->
 
             <div class="summary-box">
-              <h3>Document summary</h3>
-              <p id="summaryText">No analysis yet.</p>
+
+              <h3>
+                Document summary
+              </h3>
+
+              <p id="summaryText">
+                No analysis yet.
+              </p>
+
             </div>
 
-            <div id="hypocrisyBanner" class="hypocrisy-banner hidden">
-              ⚠ Tracker mismatch: this page contains tracking signals worth reviewing.
+
+            <!-- Tracker mismatch -->
+
+            <div
+              id="hypocrisyBanner"
+              class="hypocrisy-banner hidden"
+            >
+              ⚠ Tracker mismatch:
+              this page contains tracking signals
+              worth reviewing.
             </div>
 
-            <div id="technicalSignals" class="technical-signals hidden"></div>
 
-            <div id="semanticDiffBox" class="semantic-diff hidden"></div>
+            <!-- Technical signals -->
+
+            <div
+              id="technicalSignals"
+              class="technical-signals hidden"
+            ></div>
+
+
+            <!-- Semantic diff -->
+
+            <div
+              id="semanticDiffBox"
+              class="semantic-diff hidden"
+            ></div>
+
+
+            <!-- Findings -->
 
             <div class="findings-box">
+
               <div class="box-header">
                 <h3>Findings</h3>
               </div>
+
+
               <div class="filter-row">
-                <button class="filter-btn active" data-category="all">All</button>
-                <button class="filter-btn" data-category="MONEY">Money</button>
-                <button class="filter-btn" data-category="PRIVACY">Privacy</button>
-                <button class="filter-btn" data-category="USER_CONTENT">User Content</button>
-                <button class="filter-btn" data-category="AI_USAGE">AI Usage</button>
-                <button class="filter-btn" data-category="TERMINATION">Termination</button>
+
+                <button
+                  class="filter-btn active"
+                  data-category="all"
+                  type="button"
+                >
+                  All
+                </button>
+
+                <button
+                  class="filter-btn"
+                  data-category="MONEY"
+                  type="button"
+                >
+                  Money
+                </button>
+
+                <button
+                  class="filter-btn"
+                  data-category="PRIVACY"
+                  type="button"
+                >
+                  Privacy
+                </button>
+
+                <button
+                  class="filter-btn"
+                  data-category="USER_CONTENT"
+                  type="button"
+                >
+                  User Content
+                </button>
+
+                <button
+                  class="filter-btn"
+                  data-category="AI_USAGE"
+                  type="button"
+                >
+                  AI Usage
+                </button>
+
+                <button
+                  class="filter-btn"
+                  data-category="TERMINATION"
+                  type="button"
+                >
+                  Termination
+                </button>
+
               </div>
-              <div id="findingsList" class="findings-list"></div>
+
+
+              <div
+                id="findingsList"
+                class="findings-list"
+              ></div>
+
             </div>
 
-            <button id="gdprButton" class="gdpr-button">🥊 Задействай GDPR Art. 21 Opt-Out</button>
+
+            <!-- GDPR -->
+
+            <button
+              id="gdprButton"
+              class="gdpr-button"
+              type="button"
+            >
+              🥊 Задействай GDPR Art. 21 Opt-Out
+            </button>
+
           </div>
 
-          <div id="errorState" class="error-box hidden"></div>
+
+          <!-- Error -->
+
+          <div
+            id="errorState"
+            class="error-box hidden"
+          ></div>
+
         </section>
 
-        <section id="panel-history" class="panel hidden">
+
+        <!-- =================================================
+             HISTORY
+             ================================================= -->
+
+        <section
+          id="panel-history"
+          class="panel hidden"
+        >
+
           <div class="box-header">
             <h3>History</h3>
           </div>
-          <div id="historyList" class="history-list"></div>
+
+          <div
+            id="historyList"
+            class="history-list"
+          ></div>
+
         </section>
 
-        <section id="panel-chat" class="panel hidden">
+
+        <!-- =================================================
+             CHAT
+             ================================================= -->
+
+        <section
+          id="panel-chat"
+          class="panel hidden"
+        >
+
           <div class="box-header">
             <h3>Ask Kitty</h3>
           </div>
-          <div id="chatMessages" class="chat-messages"></div>
-          <form id="chatForm" class="chat-form">
-            <input id="questionInput" type="text" placeholder="Ask about the document..." maxlength="500" />
-            <button id="sendButton" type="submit">Send</button>
+
+
+          <div
+            id="chatMessages"
+            class="chat-messages"
+          ></div>
+
+
+          <form
+            id="chatForm"
+            class="chat-form"
+          >
+
+            <input
+              id="questionInput"
+              type="text"
+              placeholder="Ask about the document..."
+              maxlength="500"
+              autocomplete="off"
+            />
+
+            <button
+              id="sendButton"
+              type="submit"
+              aria-label="Send message"
+            >
+              Send
+            </button>
+
           </form>
+
         </section>
+
       </main>
+
     </div>
+
 
     <script src="config.js"></script>
     <script src="popup.js"></script>
+
   </body>
 </html>
