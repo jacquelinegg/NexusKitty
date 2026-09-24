@@ -351,6 +351,10 @@ class LLMService:
         if re.search(r'[\u0E00-\u0E7F]', text):
             return 'th'
         if re.search(r'[\u0400-\u04FF]', text):
+            if re.search(r'[іїєґ]', text):
+                return 'uk'
+            if re.search(r'[ыэё]', text):
+                return 'ru'
             return 'bg'
         return 'en'
 
@@ -359,12 +363,14 @@ class LLMService:
         if not context_text:
             fallbacks = {
                 'bg': 'Този документ не предвижда информация относно тази тема.',
+                'ru': 'Этот документ не содержит информации по данной теме.',
                 'ja': 'このドキュメントは、このトピックに関する情報を指定していません。',
                 'en': 'This document does not specify information regarding this topic.',
             }
         else:
             fallbacks = {
                 'bg': 'В момента не мога да получа отговор от ИИ доставчика. Опитайте отново скоро.',
+                'ru': 'В данный момент я не могу получить ответ от ИИ-провайдера. Попробуйте позже.',
                 'ja': '現在、AIプロバイダーから回答を取得できません。暫くしてからもう一度お試しください。',
                 'en': 'I couldn\'t get an answer from the AI provider right now. Please try again in a moment.',
             }
