@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from urllib.parse import urlparse
 import logging
 
-from .schemas import AnalyzeRequest, AskRequest, ClassifyRequest, ClassifyResponse, ToSAnalysisResult, AskResponse
+from .schemas import AnalyzeRequest, AskRequest, ClassifyRequest, ClassifyResponse, ToSAnalysisResult, AskResponse, safety_prediction_label
 from .services.llm_service import LLMService
 from .services.db_service import DBService
 from .config import settings
@@ -54,15 +54,17 @@ def deterministic_safety_score(
     detected_trackers: list[str],
 ) -> int:
     """
-    Calculate a stable safety score using deterministic policy and
-    network signals instead of relying on LLM score variability.
+    Calculate a safety prediction score (0-100) that represents the
+    likelihood a site's legal document is safe for ordinary users.
 
-    Higher score = fewer detected risk indicators.
+    Higher score = safer. The score is deterministic: same inputs always
+    produce the same output, so it behaves like a safety forecast rather
+    than an LLM-generated guess.
     """
 
     source = (text or "").lower()
 
-    # Stronger contractual/privacy risk indicators
+    # Strong contractual/privacy risk indicators
     high_risk_markers = (
         "sell personal data",
         "sold personal data",
@@ -401,6 +403,9 @@ async def analyze_tos(
                     request.text,
                     request.detected_trackers,
                 )
+            )
+            analysis_result.safety_prediction = (
+                safety_prediction_label(analysis_result.safety_score)
             )
 
         # ---------------------------------------------------------

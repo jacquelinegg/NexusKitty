@@ -1,5 +1,5 @@
 from ..database import get_supabase
-from ..schemas import ToSAnalysisResult
+from ..schemas import ToSAnalysisResult, safety_prediction_label
 from typing import List, Optional
 import hashlib
 
@@ -65,6 +65,9 @@ class DBService:
                 "summary": analysis_result.summary,
                 "findings": analysis_result.findings.model_dump() if hasattr(analysis_result.findings, 'model_dump') else [f.model_dump() for f in analysis_result.findings],
             }
+            prediction = getattr(analysis_result, "safety_prediction", None)
+            if prediction:
+                data["safety_prediction"] = prediction
             response = self.supabase.table('analyses').insert(data).execute()
             if response.data and len(response.data) > 0:
                 return response.data[0]['id']
@@ -87,7 +90,8 @@ class DBService:
             for record in response.data:
                 results.append(ToSAnalysisResult(
                     domain=record['domain'],
-                    safety_score=record['safety_score'],
+                    safety_score=record.get('safety_score', 0),
+                    safety_prediction=record.get('safety_prediction') or safety_prediction_label(record.get('safety_score', 0)),
                     summary=record['summary'],
                     findings=record['findings']
                 ))

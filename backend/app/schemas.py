@@ -58,9 +58,12 @@ class SemanticDiff(BaseModel):
 
 class ToSAnalysisResult(BaseModel):
     domain: str
-    # Legacy field kept only so the database and old clients keep working.
-    # The score is no longer computed or shown; it is always 0.
-    safety_score: int = Field(0, ge=0, le=100, description="Legacy field. Always set to 0.")
+    # Deterministic safety prediction (0-100). Higher = safer.
+    # Computed by deterministic_safety_score() from text markers, LLM
+    # findings, browser-detected trackers and cookie consent choices.
+    safety_score: int = Field(0, ge=0, le=100, description="Safety prediction 0-100. Higher = safer.")
+    # Human-readable label derived from safety_score (e.g. "Mostly safe").
+    safety_prediction: str = Field("Unknown", description="Label for the safety prediction, e.g. 'Very safe' or 'High risk'.")
     summary: str = Field(..., description="2-3 sentence overview of the terms")
     findings: List[Finding]
     analysis_available: bool = True
@@ -108,3 +111,19 @@ class ClassifyRequest(BaseModel):
 class ClassifyResponse(BaseModel):
     is_legal: bool = Field(..., description="Whether the text is a legal/consent document")
     error: Optional[str] = None
+
+
+def safety_prediction_label(score: int) -> str:
+    """
+    Map a numeric safety score (0-100) to a human-readable prediction label.
+    Higher score = safer.
+    """
+    if score >= 85:
+        return "Very safe"
+    if score >= 65:
+        return "Mostly safe"
+    if score >= 40:
+        return "Use with caution"
+    if score >= 20:
+        return "Risky"
+    return "High risk"

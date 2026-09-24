@@ -5,11 +5,15 @@ CREATE TABLE IF NOT EXISTS public.analyses (
     domain TEXT NOT NULL,
     title TEXT,
     safety_score INT CHECK (safety_score BETWEEN 0 AND 100),
+    safety_prediction TEXT,
     summary TEXT NOT NULL,
     findings JSONB NOT NULL DEFAULT '[]'::jsonb,
     content_hash TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Add safety_prediction column if missing (for existing tables)
+ALTER TABLE public.analyses ADD COLUMN IF NOT EXISTS safety_prediction TEXT;
 
 -- Index for fast domain/url caching lookups
 CREATE INDEX IF NOT EXISTS idx_analyses_domain ON public.analyses(domain);

@@ -542,16 +542,31 @@ function switchTab(tabName) {
 async function loadHistory() {
   try {
     const history = await request('/api/history?limit=5');
-    elements.history.innerHTML = history.length ? history.map((item) => `
+    elements.history.innerHTML = history.length ? history.map((item) => {
+      const score = Number(item.safety_score) || 0;
+      const label = item.safety_prediction || safetyLabel(score);
+      const riskClass = score >= 65 ? 'safe' : score >= 40 ? 'warning' : 'danger';
+      return `
       <article class="history-item">
         <div class="history-domain">${escapeHtml(item.domain || 'Unknown domain')}</div>
-        <div class="history-score">Safety score: ${escapeHtml(item.safety_score)}</div>
+        <div class="history-score">
+          <span class="history-score-badge ${riskClass}">${escapeHtml(label)}</span>
+          <span class="history-score-num">${score}/100</span>
+        </div>
         <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 160))}</div>
       </article>
     `).join('') : '<div class="history-item">No scans yet.</div>';
   } catch (error) {
     elements.history.innerHTML = '<div class="history-item">History is unavailable.</div>';
   }
+}
+
+function safetyLabel(score) {
+  if (score >= 85) return 'Very safe';
+  if (score >= 65) return 'Mostly safe';
+  if (score >= 40) return 'Use with caution';
+  if (score >= 20) return 'Risky';
+  return 'High risk';
 }
 
 function appendChat(role, text) {
