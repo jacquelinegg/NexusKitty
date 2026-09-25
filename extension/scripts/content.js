@@ -6,8 +6,8 @@ function cleanText(text) {
    CONSTANTS
    ========================================================= */
 
-const MAX_TEXT_LENGTH = 5000;
-const MAX_LEGAL_LINKS = 3;
+const MAX_TEXT_LENGTH = 9000;
+const MAX_LEGAL_LINKS = 5;
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 const HUD_UPDATE_DELAY = 350;
 const BANNER_BUDGET = 1500; // max chars for banner/local text, so linked policies still fit
@@ -147,57 +147,173 @@ const CMP_OVERLAY_SELECTORS = [
 ];
 
 /* =========================================================
-   RUNTIME STATE
+   ADVANCED MULTI-SOURCE EXTRACTION
    ========================================================= */
 
-let observerTimer = null;
-let domainDisabled = false;
-let domainSettingsLoaded = false;
+/* ---- Strategy 1: CMP Global Objects ---- */
+function getCmpGlobalData() {
+  let extraText = '';
 
-/* =========================================================
-   VISIBILITY / TEXT
-   ========================================================= */
-
-function isVisible(node) {
-  if (!node || node.nodeType !== Node.ELEMENT_NODE) {
-    return false;
+  // Cookiebot
+  if (window.Cookiebot && window.Cookiebot.decl) {
+    try {
+      extraText += '\n[Cookiebot Declaration]\n' + JSON.stringify(window.Cookiebot.decl, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: Cookiebot decl parse failed', e);
+    }
   }
 
-  const style = window.getComputedStyle(node);
+  // OneTrust
+  if (window.OnetrustActiveGroups || window.OneTrust) {
+    try {
+      const otData = window.OneTrust || window.OnetrustActiveGroups;
+      extraText += '\n[OneTrust Data]\n' + JSON.stringify(otData, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: OneTrust parse failed', e);
+    }
+  }
 
-  return (
-    style.display !== 'none' &&
-    style.visibility !== 'hidden' &&
-    style.opacity !== '0' &&
-    node.getClientRects().length > 0
-  );
+  // Usercentrics
+  if (window.Usercentrics) {
+    try {
+      extraText += '\n[Usercentrics Data]\n' + JSON.stringify(window.Usercentrics, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: Usercentrics parse failed', e);
+    }
+  }
+
+  // Didomi
+  if (window.Didomi) {
+    try {
+      extraText += '\n[Didomi Data]\n' + JSON.stringify(window.Didomi, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: Didomi parse failed', e);
+    }
+  }
+
+  // CMP generic
+  if (window.CMP || window.cmpManager) {
+    try {
+      extraText += '\n[Generic CMP Data]\n' + JSON.stringify(window.CMP || window.cmpManager, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: Generic CMP parse failed', e);
+    }
+  }
+
+  // Google FCS (Funding Choices)
+  if (window.googlefc) {
+    try {
+      extraText += '\n[Google Funding Choices]\n' + JSON.stringify(window.googlefc, null, 2);
+    } catch (e) {
+      console.debug('NexusKitty: Google FCS parse failed', e);
+    }
+  }
+
+  return extraText.slice(0, 5000);
 }
 
-function getNodeText(node) {
-  if (!node) {
-    return '';
+/* ---- Strategy 2: Deep Shadow DOM & Iframe Traversal ---- */
+function getDeepText(node, visited = new WeakSet()) {
+  if (!node) return '';
+  if (visited.has(node)) return ''; // Prevent cycles
+  visited.add(node);
+
+  let text = '';
+
+  // Text nodes
+  if (node.nodeType === Node.TEXT_NODE) {
+    return cleanText(node.textContent);
   }
 
-  return cleanText(node.textContent || node.innerText || '');
+  // Element nodes
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    // Skip script/style/noscript
+    const tag = node.tagName.toLowerCase();
+    if (['script', 'style', 'noscript'].includes(tag)) {
+      return '';
+    }
+
+    // Traverse Shadow Root if present
+    if (node.shadowRoot) {
+      text += ' ' + getDeepText(node.shadowRoot, visited);
+    }
+
+    // Traverse standard child nodes
+    for (const child of node.childNodes) {
+      text += ' ' + getDeepText(child, visited);
+    }
+
+    // Traverse accessible same-origin iframes
+    if (tag === 'iframe') {
+      try {
+        if (node.contentDocument && node.contentDocument.body) {
+          text += ' ' + getDeepText(node.contentDocument.body, visited);
+        }
+      } catch (e) {
+        // Cross-origin iframe, silently ignore
+      }
+    }
+  }
+
+  return text;
 }
 
-/*
- * Clone a node, remove every CMP / overlay / modal element, and return
- * the cleaned text. This prevents cookie banners (OneTrust, Didomi, etc.)
- * from polluting the scraped document text.
- */
-function getTextExcludingOverlays(node) {
-  if (!node) {
-    return '';
+/* ---- Strategy 3: Enhanced Main Document Text (Combines All Sources) ---- */
+function getMainDocumentText() {
+  const selectors = [
+    'main',
+    'article',
+    '[role="main"]',
+    '.terms',
+    '.privacy-policy',
+    '.terms-of-service',
+    '.cookie-policy',
+    '#content',
+    '.content'
+  ];
+
+  let bestText = '';
+
+  // 1. Standard visible DOM extraction (existing logic)
+  for (const selector of selectors) {
+    const node = document.querySelector(selector);
+
+    if (!node || !isVisible(node)) {
+      continue;
+    }
+
+    const text = getTextExcludingOverlays(node);
+
+    if (text.length >= 400 && text.length > bestText.length) {
+      bestText = text;
+    }
   }
 
-  const clone = node.cloneNode(true);
+  // 2. Deep Shadow DOM + Iframe text from body (captures CMP iframes)
+  const deepBodyText = getDeepText(document.body);
+  if (deepBodyText.length > bestText.length) {
+    bestText = deepBodyText;
+  }
 
-  clone
-    .querySelectorAll(CMP_OVERLAY_SELECTORS.join(', '))
-    .forEach((el) => el.remove());
+  // 3. CMP Global Objects (JavaScript state)
+  const cmpGlobalText = getCmpGlobalData();
+  if (cmpGlobalText) {
+    if (bestText) {
+      bestText += '\n\n' + cmpGlobalText;
+    } else {
+      bestText = cmpGlobalText;
+    }
+  }
 
-  return getNodeText(clone);
+  // 4. Fallback: body text excluding overlays
+  if (!bestText || bestText.length < 400) {
+    const bodyText = getTextExcludingOverlays(document.body);
+    if (bodyText.length > bestText.length) {
+      bestText = bodyText;
+    }
+  }
+
+  return bestText.slice(0, MAX_TEXT_LENGTH);
 }
 
 /* =========================================================
@@ -276,7 +392,14 @@ function isConsentContainer(node) {
 
   const text = getNodeText(node);
 
-  if (text.length < 30 || text.length > 4000) {
+  // FIX: The original upper bound of 4000 chars silently rejected large,
+  // detailed GDPR/CMP notices (e.g. Sourcepoint-style banners that list
+  // 100+ third parties, legal-basis text, article references, etc.).
+  // Those legitimately exceed 4000 characters. We still reject only the
+  // "too short to be meaningful" case; the final extracted text is
+  // truncated later anyway via BANNER_BUDGET / MAX_TEXT_LENGTH, so no
+  // need for an artificial ceiling here.
+  if (text.length < 30) {
     return false;
   }
 
@@ -361,36 +484,6 @@ function findConsentContainersInNode(rootNode) {
    LEGAL PAGE DETECTION
    ========================================================= */
 
-function getMainDocumentText() {
-  const selectors = [
-    'main',
-    'article',
-    '[role="main"]',
-    '.terms',
-    '.privacy-policy',
-    '.terms-of-service',
-    '.cookie-policy',
-    '#content',
-    '.content'
-  ];
-
-  for (const selector of selectors) {
-    const node = document.querySelector(selector);
-
-    if (!node || !isVisible(node)) {
-      continue;
-    }
-
-    const text = getTextExcludingOverlays(node);
-
-    if (text.length >= 400) {
-      return text;
-    }
-  }
-
-  return '';
-}
-
 function hasLegalSurface() {
   if (LEGAL_URL_REGEX.test(window.location.href)) {
     return true;
@@ -446,27 +539,19 @@ function findLegalLinks() {
    ========================================================= */
 
 async function fetchLegalPageText(url) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2000);
-
   try {
-    const response = await fetch(url, {
-      credentials: 'omit',
-      signal: controller.signal
+    const response = await chrome.runtime.sendMessage({
+      type: 'NEXUSKITTY_FETCH_URL',
+      url
     });
 
-    if (!response.ok) {
-      return '';
-    }
-
-    const html = await response.text();
-
-    if (!html) {
+    if (!response?.ok || !response.html) {
+      console.debug('NexusKitty: background fetch returned no html for', url, response);
       return '';
     }
 
     const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
+    const doc = parser.parseFromString(response.html, 'text/html');
 
     doc
       .querySelectorAll('script, style, nav, header, footer, svg, noscript')
@@ -484,8 +569,86 @@ async function fetchLegalPageText(url) {
   } catch (err) {
     console.debug('NexusKitty: Could not fetch legal page:', url, err);
     return '';
-  } finally {
-    clearTimeout(timeoutId);
+  }
+}
+
+/* =========================================================
+   CROSS-ORIGIN CONSENT IFRAME RECOVERY
+   ---------------------------------------------------------
+   Many CMPs (Sourcepoint and similar vendors) render the actual
+   consent/cookie banner inside a cross-origin <iframe>. The Same-Origin
+   Policy blocks contentDocument access to it entirely - it is invisible
+   to getDeepText()/getActiveConsentPopup() even though it's clearly on
+   screen. The iframe's `src` attribute string is always readable though,
+   so fetch that URL's HTML through the background relay instead.
+
+   NOTE: This raw-fetch approach only recovers server-rendered HTML. Many
+   modern CMPs (including Sourcepoint's "Notice Message App") render an
+   almost-empty HTML shell and build the actual banner text client-side
+   via JS after load. For those, this fetch will come back empty/short,
+   and the ONLY reliable source of the banner text is the content-script
+   instance running inside the iframe itself (see
+   "CROSS-ORIGIN IFRAME CONSENT DETECTION" section near the bottom of this
+   file), which sees the fully hydrated DOM and relays it up via
+   chrome.runtime messaging. That's why extractMainText() below checks
+   receivedIframeConsentText FIRST, before falling back to this fetch.
+   ========================================================= */
+
+const CMP_IFRAME_HOST_PATTERN =
+  /(onetrust|cookielaw|didomi|trustarc|evidon|quantcast|cybot|cookiebot|usercentrics|sourcepoint|sp[-_.]?prod|privacy-mgmt|consentmanager|iubenda|termly|axeptio|cmp\.|cookie-script|consensu)/i;
+
+function getConsentIframeCandidates() {
+  return Array.from(document.querySelectorAll('iframe[src]'))
+    .filter((iframe) => {
+      if (!isVisible(iframe)) {
+        return false;
+      }
+
+      const src = iframe.src || '';
+
+      if (!src || src.startsWith('about:') || src.startsWith('javascript:')) {
+        return false;
+      }
+
+      if (CMP_IFRAME_HOST_PATTERN.test(src)) {
+        return true;
+      }
+
+      // Fallback heuristic: a sizeable, overlay-positioned iframe is
+      // likely a consent/paywall dialog even if its host isn't recognized.
+      const style = window.getComputedStyle(iframe);
+      const rect = iframe.getBoundingClientRect();
+      const isOverlayLayer = ['fixed', 'sticky', 'absolute'].includes(style.position);
+      const isLargeEnough = rect.width >= 200 && rect.height >= 150;
+
+      return isOverlayLayer && isLargeEnough;
+    })
+    .map((iframe) => iframe.src)
+    .filter((src, index, array) => array.indexOf(src) === index)
+    .slice(0, 3);
+}
+
+async function fetchIframeConsentText(url) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'NEXUSKITTY_FETCH_URL',
+      url
+    });
+
+    if (!response?.ok || !response.html) {
+      console.debug('NexusKitty: background fetch returned no html for consent iframe', url, response);
+      return '';
+    }
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(response.html, 'text/html');
+
+    doc.querySelectorAll('script, style, svg, noscript').forEach((el) => el.remove());
+
+    return cleanText(doc.body ? (doc.body.textContent || doc.body.innerText || '') : '');
+  } catch (err) {
+    console.debug('NexusKitty: Could not fetch consent iframe:', url, err);
+    return '';
   }
 }
 
@@ -498,6 +661,105 @@ async function fetchLegalPageText(url) {
   * visible on the page. Returns { node, text } or null.
   * The consent popup IS the primary document the user wants to analyze.
   */
+/* =========================================================
+   CMP DETAIL EXTRACTION
+   ========================================================= */
+
+const CMP_DETAIL_SELECTORS = [
+  // Cookiebot
+  '#CookiebotWidget',
+  '#CybotCookiebotDialog',
+  '.cc-btn',
+  '.cc-link',
+  '[id*="cookiebot"]',
+  '[class*="cookiebot"]',
+  // OneTrust
+  '#onetrust-policy',
+  '#onetrust-consent-sdk',
+  '.ot-pc-footer',
+  '.ot-pc-header',
+  '[id*="onetrust"]',
+  '[class*="onetrust"]',
+  // Didomi
+  '#didomi-popup',
+  '[id*="didomi"]',
+  '[class*="didomi"]',
+  // Usercentrics
+  '[data-testid*="uc-"]',
+  '[class*="usercentrics"]',
+  // iubenda
+  '[class*="iubenda"]',
+  '[id*="iubenda"]',
+  // Termly
+  '[class*="termly"]',
+  '[id*="termly"]',
+  // Generic detail/accordion patterns
+  '[id*="details"]',
+  '[class*="details"]',
+  '[id*="accordion"]',
+  '[class*="accordion"]',
+  '[id*="vendor"]',
+  '[class*="vendor"]',
+  '[id*="purpose"]',
+  '[class*="purpose"]',
+  '[id*="category"]',
+  '[class*="category"]',
+  '[id*="cookie-table"]',
+  '[class*="cookie-table"]',
+  '[id*="cookie-list"]',
+  '[class*="cookie-list"]',
+  '[id*="partner"]',
+  '[class*="partner"]',
+  '[id*="third-party"]',
+  '[class*="third-party"]',
+  '.cookie-consent-details',
+  '.consent-details',
+  '.vendor-list',
+  '.purpose-list',
+  '.cookie-policy-details',
+  '[role="tabpanel"]',
+  '[aria-hidden="true"]',
+  'details > summary',
+  'details[open]',
+  '[data-tab]', '[data-panel]'
+];
+
+function extractCMPDetails(cmpElement) {
+  if (!cmpElement) return '';
+
+  let combinedText = getNodeText(cmpElement);
+
+  // Find and extract text from detail/accordion sections
+  const detailElements = cmpElement.querySelectorAll(CMP_DETAIL_SELECTORS.join(', '));
+
+  for (const detailEl of detailElements) {
+    // Skip if it's the main container itself
+    if (detailEl === cmpElement) continue;
+
+    const detailText = getNodeText(detailEl);
+    if (detailText && detailText.length > 20) {
+      // Avoid duplicates
+      if (!combinedText.includes(detailText.slice(0, 50))) {
+        combinedText += '\n\n[CMP Detail Section]\n' + detailText;
+      }
+    }
+  }
+
+  // Also check for hidden tab panels / accordion content that might be collapsed
+  const hiddenPanels = cmpElement.querySelectorAll(
+    '[role="tabpanel"], [aria-hidden="true"], details:not([open]), .hidden, [style*="display: none"], [style*="visibility: hidden"]'
+  );
+
+  for (const panel of hiddenPanels) {
+    const panelText = getNodeText(panel);
+    if (panelText && panelText.length > 30 && !combinedText.includes(panelText.slice(0, 50))) {
+      combinedText += '\n\n[CMP Hidden Panel]\n' + panelText;
+    }
+  }
+
+  return combinedText.slice(0, MAX_TEXT_LENGTH);
+}
+
 function getActiveConsentPopup() {
   const activeSelectors = [
     ...CMP_OVERLAY_SELECTORS,
@@ -513,23 +775,25 @@ function getActiveConsentPopup() {
       continue;
     }
 
-    const text = getNodeText(el);
+    // Extract full CMP text including detail sections
+    const fullCmpText = extractCMPDetails(el);
 
     // Must contain consent-related keywords to qualify as a consent popup
     if (
-      text.length >= 30 &&
-      /(cookie|consent|privacy|policy|gdpr|personal data|accept|agree|close|reject|manage)/i.test(text)
+      fullCmpText.length >= 30 &&
+      /(cookie|consent|privacy|policy|gdpr|personal data|accept|agree|close|reject|manage)/i.test(fullCmpText)
     ) {
-      return { node: el, text: text.slice(0, BANNER_BUDGET) };
+      return { node: el, text: fullCmpText };
     }
   }
 
   // Fall back to structural consent containers
   const containers = getConsentContainers();
   if (containers.length > 0) {
+    const fullText = extractCMPDetails(containers[0].node);
     return {
       node: containers[0].node,
-      text: containers[0].text.slice(0, BANNER_BUDGET)
+      text: fullText
     };
   }
 
@@ -538,15 +802,132 @@ function getActiveConsentPopup() {
 
 async function extractMainText() {
   /*
-    * PRIORITY 1: Active consent/CMP overlay or modal dialog.
-    * The consent popup IS the primary document the user wants to analyze.
-    */
+   * PRIORITY 0: Dedicated legal page URL takes absolute precedence.
+   * If user is on a Privacy Policy / Terms / Legal page, we want the FULL document,
+   * not just the cookie banner at the top.
+   */
+  const DEDICATED_LEGAL_URL_KEYWORDS = [
+    'privacy', 'terms', 'conditions', 'cookie-policy', 'cookie_policy',
+    'legal', 'gdpr', 'tos', 'obshti-usloviya', 'polzovatelsko-soglashenie',
+    'usloviya-polzovaniya', 'politika-konfidentsialnosti', 'privacy-policy',
+    'terms-of-service', 'terms-of-use', 'data-protection', 'data_policy',
+    'legal-notice', 'impressum', 'aviso-legal', 'mentions-legales',
+    'datenschutz', 'nutzungsbedingungen', 'allgemeine-geschaeftsbedingungen',
+    'cookies', 'consent', 'user-agreement', 'service-terms'
+  ];
+
+  function isDedicatedLegalPage() {
+    const url = window.location.href.toLowerCase();
+    return DEDICATED_LEGAL_URL_KEYWORDS.some(kw => url.includes(kw));
+  }
+
+  if (isDedicatedLegalPage()) {
+    console.log('NexusKitty: Dedicated legal page URL detected. Extracting full page content.');
+
+    // Get the main document text (excluding CMP overlays)
+    let baseText = getMainDocumentText();
+
+    // Fallback: if structured extraction fails, use body text excluding overlays
+    if (!baseText || baseText.length <= 400) {
+      const bodyText = getTextExcludingOverlays(document.body);
+      if (bodyText && bodyText.length > 400) {
+        baseText = bodyText;
+      }
+    }
+
+    if (baseText && baseText.length > 100) {
+      // Some "Terms" pages are just an index/router that points to the real
+      // documents ("please read them carefully here", linking out to
+      // UK/US/German Terms and a separate Privacy Notice). Follow those
+      // legal-looking links too, so the analysis sees the actual substantive
+      // text instead of just the router page.
+      const legalLinks = findLegalLinks();
+      console.log('NexusKitty [debug]: dedicated legal page, found links:', legalLinks);
+
+      let fetchedPagesText = '';
+
+      if (legalLinks.length > 0) {
+        const pageTexts = await Promise.all(
+          legalLinks.map(async (link) => {
+            const text = await fetchLegalPageText(link.href);
+            console.log(`NexusKitty [debug]: fetched "${link.href}" -> ${text.length} chars`);
+            return text;
+          })
+        );
+
+        fetchedPagesText = pageTexts
+          .filter((text) => text.length > 200)
+          .join('\n\n--- NEXT LEGAL SECTION ---\n\n');
+      } else {
+        console.log('NexusKitty [debug]: no legal-looking <a href> links found on this page (anchors and javascript: links are excluded).');
+      }
+
+      console.log(`NexusKitty [debug]: fetchedPagesText total length = ${fetchedPagesText.length}`);
+
+      const combined = fetchedPagesText
+        ? `${baseText}\n\n[Linked legal documents]\n${fetchedPagesText}`
+        : baseText;
+
+      return combined.slice(0, MAX_TEXT_LENGTH);
+    }
+  }
+
+  /*
+   * PRIORITY 1: Active consent/CMP overlay or modal dialog.
+   * The consent popup IS the primary document the user wants to analyze.
+   */
 
   const activePopup = getActiveConsentPopup();
 
-  if (activePopup) {
-    const popupText = activePopup.text;
+  let popupText = activePopup?.text || '';
 
+  // FIX: Prefer text already relayed up from a cross-origin CMP iframe's
+  // OWN content-script instance (see "CROSS-ORIGIN IFRAME CONSENT
+  // DETECTION" near the bottom of this file). That instance runs inside
+  // the iframe's real execution context and sees the fully JS-rendered/
+  // hydrated DOM. This is critical for CMPs like Sourcepoint's "Notice
+  // Message App", which ship an almost-empty server-rendered HTML shell
+  // and build the actual banner text client-side - a raw fetch() of the
+  // iframe URL (fetchIframeConsentText, below) will NOT see that text at
+  // all, only the empty shell.
+  if (receivedIframeConsentText.length > popupText.length) {
+    popupText = receivedIframeConsentText;
+  }
+
+  // Many CMPs (Sourcepoint, some OneTrust/Usercentrics setups, etc.) render
+  // the actual consent banner inside a CROSS-ORIGIN <iframe>. The browser's
+  // Same-Origin Policy blocks contentDocument access to that iframe entirely
+  // - getDeepText()/getActiveConsentPopup() silently return nothing for it,
+  // even though the banner is clearly visible on screen. The iframe's `src`
+  // URL string itself is always readable though, so fetch that page's HTML
+  // through the background relay (extension fetches bypass CORS on read).
+  //
+  // FIX: This raw fetch is now just a fallback for CMPs that DO
+  // server-render their text into the initial HTML. It runs only if the
+  // iframe-relay text above wasn't good enough.
+  if (popupText.length < 150) {
+    const iframeCandidates = getConsentIframeCandidates();
+
+    if (iframeCandidates.length) {
+      console.log('NexusKitty [debug]: trying cross-origin consent iframe(s):', iframeCandidates);
+
+      const iframeTexts = await Promise.all(
+        iframeCandidates.map((src) => fetchIframeConsentText(src))
+      );
+
+      const combinedIframeText = iframeTexts
+        .filter((text) => text.length > 80)
+        .join('\n\n--- NEXT CONSENT FRAME ---\n\n');
+
+      console.log(`NexusKitty [debug]: recovered ${combinedIframeText.length} chars from consent iframe(s)`);
+
+      if (combinedIframeText.length > popupText.length) {
+        popupText = combinedIframeText;
+      }
+    }
+  }
+
+  if (popupText) {
     // Treat consent text as valid legal content even when short (150+ chars).
     if (popupText.length >= 150) {
       // If popup text is brief (< 400 chars), combine with page context
@@ -976,6 +1357,95 @@ function getConsentSnapshot() {
 }
 
 /* =========================================================
+   MODULE STATE
+   ---------------------------------------------------------
+   These were referenced (loadDomainSettings, isDomainDisabledSync,
+   scheduleConsentHudUpdate) without ever being declared, which threw
+   "ReferenceError: domainSettingsLoaded is not defined" at the very
+   start of initContentScript() and aborted the whole content script
+   before any page text extraction or link-following could run.
+   ========================================================= */
+let domainDisabled = false;
+let domainSettingsLoaded = false;
+let observerTimer = null;
+
+// Populated when a content-script instance running INSIDE a cross-origin
+// CMP iframe (e.g. Sourcepoint) detects and relays its own rendered consent
+// text up to this (top-frame) instance via background.js. Same-Origin Policy
+// makes it impossible to read that iframe's DOM directly from here.
+let receivedIframeConsentText = '';
+
+// FIX: Debounced re-analysis trigger. When a relayed iframe consent text
+// arrives, it usually does so AFTER the top frame's initial
+// buildPagePayload() already ran (the iframe needs time to load and
+// hydrate). Without this, receivedIframeConsentText would sit unused until
+// some unrelated event (like a DOM mutation) happened to trigger another
+// analysis pass. This makes the relay itself trigger a fresh, forced
+// (non-cached) analysis once enough text has arrived.
+let iframeRelayReanalysisTimer = null;
+let lastReanalyzedIframeTextLength = 0;
+
+function scheduleReanalysisAfterIframeRelay() {
+  if (isDomainDisabledSync()) {
+    return;
+  }
+
+  // Avoid re-triggering repeatedly for the same (or shorter) text.
+  if (receivedIframeConsentText.length <= lastReanalyzedIframeTextLength) {
+    return;
+  }
+
+  if (iframeRelayReanalysisTimer) {
+    clearTimeout(iframeRelayReanalysisTimer);
+  }
+
+  // Small debounce: multiple relay messages can arrive in quick succession
+  // (see scheduleIframeReports at the bottom of this file, which reports at
+  // 0ms/800ms/2000ms), so wait briefly for them to settle before
+  // re-running the (potentially expensive) extraction + backend analysis.
+  iframeRelayReanalysisTimer = setTimeout(async () => {
+    iframeRelayReanalysisTimer = null;
+
+    if (isDomainDisabledSync()) {
+      return;
+    }
+
+    lastReanalyzedIframeTextLength = receivedIframeConsentText.length;
+
+    try {
+      // force_refresh: bypass the cache, since the cached payload was built
+      // before the iframe text was available.
+      const payload = await buildPagePayload(true);
+
+      // Keep compatibility with the existing page-text storage, same as
+      // initContentScript() does on first load.
+      if (payload?.text?.length > 0) {
+        try {
+          await chrome.storage.local.set({
+            [`nexuskitty_page_${window.location.href}`]: payload.text
+          });
+        } catch (error) {
+          console.debug('NexusKitty: Could not save page text after iframe relay.', error);
+        }
+      }
+
+      // Notify background.js so it can (re-)send the updated payload to the
+      // backend for analysis, same as the initial page load flow.
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'NEXUSKITTY_PAGE_DATA_UPDATED',
+          payload
+        });
+      } catch (error) {
+        console.debug('NexusKitty: Could not notify background of updated payload.', error);
+      }
+    } catch (error) {
+      console.debug('NexusKitty: Re-analysis after iframe relay failed.', error);
+    }
+  }, 400);
+}
+
+/* =========================================================
    DOMAIN SETTINGS
    ========================================================= */
 
@@ -1201,6 +1671,56 @@ async function pruneExpiredCache() {
 }
 
 /* =========================================================
+   ZERO-FAILURE ASYNC EXTRACTION PIPELINE
+   ========================================================= */
+
+async function extractDocumentTextAsync() {
+  let extractedText = "";
+
+  // 1. Direct Cookiebot / CMP Text Aggregation (DOM + Shadow DOM + Iframes)
+  const cmpNodes = document.querySelectorAll('#CybotCookiebotDialog, #CookiebotWidget, [id*="Cookiebot"], [id*="cmpbox"], [class*="cookie"]');
+  cmpNodes.forEach(node => {
+    extractedText += " " + (node.innerText || node.textContent || "");
+  });
+
+  // 2. JS Global Object Inspection (Cookiebot state)
+  try {
+    if (window.Cookiebot && window.Cookiebot.decl) {
+      extractedText += "\n\nCookiebot Declaration Data: " + JSON.stringify(window.Cookiebot.decl);
+    }
+  } catch (e) {
+    console.warn("Could not read window.Cookiebot", e);
+  }
+
+  // 3. Background Link Fetching (If DOM text is under 100 characters)
+  if (extractedText.trim().length < 100) {
+    const legalLink = Array.from(document.querySelectorAll('a[href]')).find(a => {
+      const h = a.href.toLowerCase();
+      const t = a.innerText.toLowerCase();
+      return ['privacy', 'poveritelnost', 'terms', 'usloviya', 'cookie', 'biskvitki'].some(kw => h.includes(kw) || t.includes(kw));
+    });
+    if (legalLink && legalLink.href.startsWith('http')) {
+      try {
+        const html = await fetchLegalPageText(legalLink.href);
+        if (html) {
+          extractedText += "\n\n" + html;
+        }
+      } catch (err) {
+        console.warn("Background fetch failed:", err);
+      }
+    }
+  }
+
+  // 4. HARD FALLBACK: If EVERYTHING else is short, use document.body.innerText
+  if (extractedText.trim().length < 20) {
+    extractedText = document.body.innerText || "Legal analysis fallback for site: " + window.location.hostname;
+  }
+
+  // ALWAYS RETURN TEXT (NEVER NULL OR EMPTY)
+  return { source: 'zero_failure', text: extractedText };
+}
+
+/* =========================================================
    PAGE PAYLOAD
    ========================================================= */
 
@@ -1273,13 +1793,27 @@ async function applyRiskWarning(categories, shouldWarn) {
 
 async function handleMessage(request, sender, sendResponse) {
   try {
-    // Request current page data.
+    // Request current page data (legacy).
     if (request && request.type === 'NEXUSKITTY_GET_PAGE_DATA') {
       const payload = await buildPagePayload(request.force_refresh === true);
 
       sendResponse({
         ok: true,
         ...payload
+      });
+
+      return;
+    }
+
+    // NEW: Async multi-layer document text extraction.
+    if (request && request.type === 'NEXUSKITTY_GET_DOCUMENT_TEXT') {
+      const result = await extractDocumentTextAsync();
+
+      sendResponse({
+        ok: true,
+        source: result.source,
+        text: result.text,
+        fetchedUrl: result.fetchedUrl || null
       });
 
       return;
@@ -1294,6 +1828,28 @@ async function handleMessage(request, sender, sendResponse) {
         lastCategories,
         lastShouldWarn
       );
+
+      sendResponse({ ok: true });
+
+      return;
+    }
+
+    // Consent text relayed from a cross-origin CMP iframe running its own
+    // content-script instance (see background.js NEXUSKITTY_IFRAME_CONSENT_TEXT).
+    if (request && request.type === 'NEXUSKITTY_IFRAME_CONSENT_TEXT_RELAY') {
+      if (request.text && request.text.length > receivedIframeConsentText.length) {
+        receivedIframeConsentText = request.text;
+        console.log(
+          `NexusKitty [debug]: received consent text relayed from cross-origin iframe (${request.frameUrl || 'unknown frame'}), length = ${receivedIframeConsentText.length}`
+        );
+
+        // FIX: Previously this text was only stored and never consumed
+        // again unless some unrelated DOM mutation happened to trigger a
+        // fresh analysis. Now the relay itself schedules a forced
+        // re-analysis so the newly-arrived banner text actually reaches
+        // extractMainText() / the backend.
+        scheduleReanalysisAfterIframeRelay();
+      }
 
       sendResponse({ ok: true });
 
@@ -1468,10 +2024,79 @@ async function initContentScript() {
 }
 
 /* =========================================================
+   CROSS-ORIGIN IFRAME CONSENT DETECTION (this frame IS an iframe)
+   ---------------------------------------------------------
+   With "all_frames": true in the manifest, this script also runs inside
+   every iframe on the page - including cross-origin CMP iframes (e.g.
+   Sourcepoint) that the TOP frame's JavaScript can never read directly
+   because of the Same-Origin Policy. Running here, inside the iframe's own
+   execution context, sidesteps that restriction entirely: we see the fully
+   JS-rendered DOM, not just the empty server-sent HTML shell a plain
+   fetch() would return. If this looks like a consent/CMP surface, relay the
+   extracted text up to the top frame via background.js.
+   ========================================================= */
+
+function detectOwnFrameConsentText() {
+  const popup = getActiveConsentPopup();
+  if (popup && popup.text && popup.text.length >= 80) {
+    return popup.text;
+  }
+
+  // Fallback: recognizable CMP markup (e.g. Sourcepoint's sp_choice_type_*
+  // buttons) even when it doesn't match a known container selector.
+  const spNode = document.querySelector(
+    '.message.type-modal, [class*="sp_choice_type"], #notice.message, [class*="message-component"]'
+  );
+
+  if (spNode) {
+    const container = spNode.closest('.message, [role="dialog"], [aria-modal="true"], body') || spNode;
+    const text = getNodeText(container);
+    if (text && text.length >= 80) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+function reportIframeConsentText() {
+  try {
+    const text = detectOwnFrameConsentText();
+
+    if (text) {
+      chrome.runtime.sendMessage({
+        type: 'NEXUSKITTY_IFRAME_CONSENT_TEXT',
+        text,
+        frameUrl: window.location.href,
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.debug('NexusKitty: iframe consent detection failed', err);
+  }
+}
+
+/* =========================================================
    START
    ========================================================= */
 
-if (document.readyState === 'loading') {
+if (window.self !== window.top) {
+  // Inside an iframe: only try to detect and relay consent/CMP content.
+  // Never run the full page pipeline (mutation observer, badge, cache,
+  // domain settings, etc.) inside an arbitrary third-party iframe.
+  const scheduleIframeReports = () => {
+    reportIframeConsentText();
+    // CMP content is frequently rendered asynchronously after the iframe's
+    // own load event, so check again a couple of times.
+    setTimeout(reportIframeConsentText, 800);
+    setTimeout(reportIframeConsentText, 2000);
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', scheduleIframeReports, { once: true });
+  } else {
+    scheduleIframeReports();
+  }
+} else if (document.readyState === 'loading') {
   document.addEventListener(
     'DOMContentLoaded',
     () => {

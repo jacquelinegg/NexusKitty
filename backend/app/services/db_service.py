@@ -56,29 +56,36 @@ class DBService:
         Save the analysis result to Supabase and return the record ID.
         If RLS blocks writes, return None instead of crashing the endpoint.
         """
-        try:
-            data = {
-                "url": url,
-                "domain": domain,
-                "title": title,
-                "safety_score": analysis_result.safety_score,
-                "summary": analysis_result.summary,
-                "findings": analysis_result.findings.model_dump() if hasattr(analysis_result.findings, 'model_dump') else [f.model_dump() for f in analysis_result.findings],
-            }
-            prediction = getattr(analysis_result, "safety_prediction", None)
-            if prediction:
-                data["safety_prediction"] = prediction
-            response = self.supabase.table('analyses').insert(data).execute()
-            if response.data and len(response.data) > 0:
-                return response.data[0]['id']
-            else:
-                raise Exception("Failed to save analysis: no data returned")
-        except Exception as e:
-            message = str(e).lower()
-            if "row-level security" in message or "42501" in message or "rls" in message:
-                print(f"Supabase write denied by RLS; proceeding without cache save: {e}")
-                return None
-            raise Exception(f"Failed to save analysis to Supabase: {e}")
+        data = {
+            "url": url,
+            "domain": domain,
+            "title": title,
+            "safety_score": analysis_result.safety_score,
+            "summary": analysis_result.summary,
+            "findings": analysis_result.findings.model_dump() if hasattr(analysis_result.findings, 'model_dump') else [f.model_dump() for f in analysis_result.findings],
+        }
+        prediction = getattr(analysis_result, "safety_prediction", None)
+        if prediction:
+            data["safety_prediction"] = prediction
+
+        for attempt in range(2):
+            try:
+                response = self.supabase.table('analyses').insert(data).execute()
+                if response.data and len(response.data) > 0:
+                    return response.data[0]['id']
+                else:
+                    raise Exception("Failed to save analysis: no data returned")
+            except Exception as e:
+                message = str(e).lower()
+                if "row-level security" in message or "42501" in message or "rls" in message:
+                    print(f"Supabase write denied by RLS; proceeding without cache save: {e}")
+                    return None
+                if "could not find the" in message and "column" in message and "safety_prediction" in message and attempt == 0:
+                    # Schema cache stale - retry without safety_prediction
+                    print(f"Schema cache stale, retrying without safety_prediction: {e}")
+                    data.pop("safety_prediction", None)
+                    continue
+                raise Exception(f"Failed to save analysis to Supabase: {e}")
 
     async def get_recent_analyses(self, limit: int = 10) -> List[ToSAnalysisResult]:
         """

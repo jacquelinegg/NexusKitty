@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   url: '',
   text: '',
   trackers: [],
@@ -43,12 +43,10 @@ function setStatus(online) {
   elements.status.classList.toggle('offline', !online);
 }
 
-function showLoading(message = 'Analyzing...') {
+function showLoading() {
   elements.loading?.classList.remove('hidden');
   elements.analysis?.classList.add('hidden');
   elements.error?.classList.add('hidden');
-  const loadingText = elements.loading?.querySelector('p');
-  if (loadingText) loadingText.textContent = message;
 }
 
 function showError(message, allowOverride = false, allowReenable = false) {
@@ -74,7 +72,7 @@ function showError(message, allowOverride = false, allowReenable = false) {
     const reenableButton = document.createElement('button');
     reenableButton.className = 'error-action reenable-btn';
     reenableButton.type = 'button';
-    reenableButton.textContent = 'Включи NexusKitty за този сайт';
+    reenableButton.textContent = 'Р’РєР»СЋС‡Рё NexusKitty Р·Р° С‚РѕР·Рё СЃР°Р№С‚';
     reenableButton.addEventListener('click', toggleSiteStatus);
     elements.error.appendChild(reenableButton);
   }
@@ -181,7 +179,7 @@ function renderAnalysis(result) {
     : `${findings.length} issues worth reviewing`;
 
   elements.issueBreakdown.innerHTML = Object.entries(counts)
-    .map(([category, count]) => `<span><strong>${escapeHtml(categoryLabels[category] || category)}</strong> — ${count}</span>`)
+    .map(([category, count]) => `<span><strong>${escapeHtml(categoryLabels[category] || category)}</strong> вЂ” ${count}</span>`)
     .join('');
 
   elements.risk.textContent = findings.length ? 'Review' : 'Clear';
@@ -200,7 +198,7 @@ function renderAnalysis(result) {
     finding.attention_level === 'HIGH' || ['AI_USAGE', 'DATA_SALE'].includes(finding.category)
   );
 
-  // Актуализация на значката (Badge) при задължителен преглед
+  // РђРєС‚СѓР°Р»РёР·Р°С†РёСЏ РЅР° Р·РЅР°С‡РєР°С‚Р° (Badge) РїСЂРё Р·Р°РґСЉР»Р¶РёС‚РµР»РµРЅ РїСЂРµРіР»РµРґ
   const requiresAttention = Boolean(alert?.detected || highRiskCount >= 1);
   updateBadgeAlert(requiresAttention);
 
@@ -239,7 +237,7 @@ function renderTechnicalSignals(result) {
     <div class="technical-heading">Technical layer</div>
     <div class="technical-title">Observed website signals</div>
     <p>These domains were observed while the page was open. Compare them with the site's privacy disclosures.</p>
-    <div class="tracker-list">${trackers.map((tracker) => `<span>✓ ${escapeHtml(tracker)}</span>`).join('')}</div>
+    <div class="tracker-list">${trackers.map((tracker) => `<span>вњ“ ${escapeHtml(tracker)}</span>`).join('')}</div>
   `;
 }
 
@@ -263,27 +261,27 @@ function detectLanguage(text) {
   if (/[\u0900-\u097F]/.test(text)) return 'hi';
   if (/[\u0E00-\u0E7F]/.test(text)) return 'th';
   if (/[\u0400-\u04FF]/.test(text)) {
-    if (/[іїєґ]/.test(text)) return 'uk';
-    if (/[ыэё]/.test(text)) return 'ru';
+    if (/[С–С—С”Т‘]/.test(text)) return 'uk';
+    if (/[С‹СЌС‘]/.test(text)) return 'ru';
     return 'bg';
   }
   return 'en';
 }
 
 const ERROR_MESSAGES = {
-  bg: 'Възникна грешка при връзката с модела. Моля, опитайте пак.',
-  ru: 'Возникла ошибка при подключении к модели. Попробуйте позже.',
-  uk: 'Виникла помилка під час підключення до моделі. Спробуйте пізніше.',
-  ja: 'モデルへの接続中にエラーが発生しました。後でもう一度試してください。',
+  bg: 'Р’СЉР·РЅРёРєРЅР° РіСЂРµС€РєР° РїСЂРё РІСЂСЉР·РєР°С‚Р° СЃ РјРѕРґРµР»Р°. РњРѕР»СЏ, РѕРїРёС‚Р°Р№С‚Рµ РїР°Рє.',
+  ru: 'Р’РѕР·РЅРёРєР»Р° РѕС€РёР±РєР° РїСЂРё РїРѕРґРєР»СЋС‡РµРЅРёРё Рє РјРѕРґРµР»Рё. РџРѕРїСЂРѕР±СѓР№С‚Рµ РїРѕР·Р¶Рµ.',
+  uk: 'Р’РёРЅРёРєР»Р° РїРѕРјРёР»РєР° РїС–Рґ С‡Р°СЃ РїС–РґРєР»СЋС‡РµРЅРЅСЏ РґРѕ РјРѕРґРµР»С–. РЎРїСЂРѕР±СѓР№С‚Рµ РїС–Р·РЅС–С€Рµ.',
+  ja: 'гѓўгѓ‡гѓ«гЃёгЃ®жЋҐз¶љдё­гЃ«г‚Ёгѓ©гѓјгЃЊз™єз”џгЃ—гЃѕгЃ—гЃџгЂ‚еѕЊгЃ§г‚‚гЃ†дёЂеє¦и©¦гЃ—гЃ¦гЃЏгЃ гЃ•гЃ„гЂ‚',
   en: 'An error occurred while connecting to the AI model. Please try again shortly.',
 };
 
 const UI_ERRORS = {
   bg: {
-    noText: 'Не е намерен четим текст за правен документ на тази страница. Отворете Terms, Conditions, Privacy или Cookies и опитайте отново.',
-    notLegal: 'Изглежда като обикновена уеб страница, а не правен документ. Отворете Terms, Privacy или Cookie Policy страницата и опитайте отново.',
-    backendDown: 'Бекендът е недостъпен. Проверете https://nexuskitty.onrender.com и презаредете разширението.',
-    disabled: 'NexusKitty е изключен за',
+    noText: 'РќРµ Рµ РЅР°РјРµСЂРµРЅ С‡РµС‚РёРј С‚РµРєСЃС‚ Р·Р° РїСЂР°РІРµРЅ РґРѕРєСѓРјРµРЅС‚ РЅР° С‚Р°Р·Рё СЃС‚СЂР°РЅРёС†Р°. РћС‚РІРѕСЂРµС‚Рµ Terms, Conditions, Privacy РёР»Рё Cookies Рё РѕРїРёС‚Р°Р№С‚Рµ РѕС‚РЅРѕРІРѕ.',
+    notLegal: 'РР·РіР»РµР¶РґР° РєР°С‚Рѕ РѕР±РёРєРЅРѕРІРµРЅР° СѓРµР± СЃС‚СЂР°РЅРёС†Р°, Р° РЅРµ РїСЂР°РІРµРЅ РґРѕРєСѓРјРµРЅС‚. РћС‚РІРѕСЂРµС‚Рµ Terms, Privacy РёР»Рё Cookie Policy СЃС‚СЂР°РЅРёС†Р°С‚Р° Рё РѕРїРёС‚Р°Р№С‚Рµ РѕС‚РЅРѕРІРѕ.',
+    backendDown: 'Р‘РµРєРµРЅРґСЉС‚ Рµ РЅРµРґРѕСЃС‚СЉРїРµРЅ. РџСЂРѕРІРµСЂРµС‚Рµ https://nexuskitty.onrender.com Рё РїСЂРµР·Р°СЂРµРґРµС‚Рµ СЂР°Р·С€РёСЂРµРЅРёРµС‚Рѕ.',
+    disabled: 'NexusKitty Рµ РёР·РєР»СЋС‡РµРЅ Р·Р°',
   },
   en: {
     noText: 'No readable legal document text found on this page. Open Terms, Conditions, Privacy, or Cookies and try again.',
@@ -318,71 +316,71 @@ function looksLikeLegalDocument(url, text) {
     'data processing', 'consent', 'third parties', 'third-party',
     'data retention', 'arbitration', 'governing law', 'refund policy', 'subscription',
     // Bulgarian
-    'правила за поверителност', 'политика по поверителност', 'бисквитки',
-    'съгласие', 'лични данни', 'обработка на данни', 'трети страни',
-    'правила и условия', 'арбитраж', 'данъчно задържане', 'абонамент',
+    'РїСЂР°РІРёР»Р° Р·Р° РїРѕРІРµСЂРёС‚РµР»РЅРѕСЃС‚', 'РїРѕР»РёС‚РёРєР° РїРѕ РїРѕРІРµСЂРёС‚РµР»РЅРѕСЃС‚', 'Р±РёСЃРєРІРёС‚РєРё',
+    'СЃСЉРіР»Р°СЃРёРµ', 'Р»РёС‡РЅРё РґР°РЅРЅРё', 'РѕР±СЂР°Р±РѕС‚РєР° РЅР° РґР°РЅРЅРё', 'С‚СЂРµС‚Рё СЃС‚СЂР°РЅРё',
+    'РїСЂР°РІРёР»Р° Рё СѓСЃР»РѕРІРёСЏ', 'Р°СЂР±РёС‚СЂР°Р¶', 'РґР°РЅСЉС‡РЅРѕ Р·Р°РґСЉСЂР¶Р°РЅРµ', 'Р°Р±РѕРЅР°РјРµРЅС‚',
     // Russian
-    'политика конфиденциальности', 'файлы cookie', 'согласие',
-    'личные данные', 'обработка данных', 'третьи стороны',
-    'условия', 'арбитраж', 'подписка', 'договор', ' возврат',
+    'РїРѕР»РёС‚РёРєР° РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё', 'С„Р°Р№Р»С‹ cookie', 'СЃРѕРіР»Р°СЃРёРµ',
+    'Р»РёС‡РЅС‹Рµ РґР°РЅРЅС‹Рµ', 'РѕР±СЂР°Р±РѕС‚РєР° РґР°РЅРЅС‹С…', 'С‚СЂРµС‚СЊРё СЃС‚РѕСЂРѕРЅС‹',
+    'СѓСЃР»РѕРІРёСЏ', 'Р°СЂР±РёС‚СЂР°Р¶', 'РїРѕРґРїРёСЃРєР°', 'РґРѕРіРѕРІРѕСЂ', ' РІРѕР·РІСЂР°С‚',
     // Ukrainian
-    'політика конфіденційності', ' файли cookie', 'згода',
-    'особисті дані', 'обробка даних', 'треті сторони',
-    'умови', 'арбітраж', 'підписка',
+    'РїРѕР»С–С‚РёРєР° РєРѕРЅС„С–РґРµРЅС†С–Р№РЅРѕСЃС‚С–', ' С„Р°Р№Р»Рё cookie', 'Р·РіРѕРґР°',
+    'РѕСЃРѕР±РёСЃС‚С– РґР°РЅС–', 'РѕР±СЂРѕР±РєР° РґР°РЅРёС…', 'С‚СЂРµС‚С– СЃС‚РѕСЂРѕРЅРё',
+    'СѓРјРѕРІРё', 'Р°СЂР±С–С‚СЂР°Р¶', 'РїС–РґРїРёСЃРєР°',
     // German
     'datenschutz', 'cookies', 'einwilligung', 'nutzungsbedingungen',
     'vertrag', 'widerruf', 'abonnement',
     // French
-    'politique de confidentialité', 'cookies', 'consentement',
-    'conditions générales', 'données personnelles', 'abonnement',
+    'politique de confidentialitГ©', 'cookies', 'consentement',
+    'conditions gГ©nГ©rales', 'donnГ©es personnelles', 'abonnement',
     // Spanish
-    'política de privacidad', 'cookies', 'consentimiento',
-    'términos y condiciones', 'datos personales', 'suscripción',
+    'polГ­tica de privacidad', 'cookies', 'consentimiento',
+    'tГ©rminos y condiciones', 'datos personales', 'suscripciГіn',
     // Italian
     'politica sulla privacy', 'cookie', 'consenso',
     'condizioni generali', 'dati personali', 'abbonamento',
     // Portuguese
-    'política de privacidade', 'cookies', 'consentimento',
-    'condições gerais', 'dados pessoais', 'assinatura',
+    'polГ­tica de privacidade', 'cookies', 'consentimento',
+    'condiГ§Гµes gerais', 'dados pessoais', 'assinatura',
     // Dutch
     'privacybeleid', 'cookies', 'toestemming',
     'gebruiksvoorwaarden', 'persoonsgegevens', 'abonnement',
     // Polish
-    'polityka prywatności', 'ciasteczka', 'zgoda',
+    'polityka prywatnoЕ›ci', 'ciasteczka', 'zgoda',
     'warunki korzystania', 'dane osobowe', 'abonament',
     // Czech
-    'zásady ochrany osobních údajů', 'cookies', 'souhlas',
-    'podmínky použití', 'osobní údaje',
+    'zГЎsady ochrany osobnГ­ch ГєdajЕЇ', 'cookies', 'souhlas',
+    'podmГ­nky pouЕѕitГ­', 'osobnГ­ Гєdaje',
     // Hungarian
-    'adatvédelmi nyilatkozat', 'sütik', 'hozzájárulás',
-    'használati feltételek', 'személyes adatok', 'előfizetés',
+    'adatvГ©delmi nyilatkozat', 'sГјtik', 'hozzГЎjГЎrulГЎs',
+    'hasznГЎlati feltГ©telek', 'szemГ©lyes adatok', 'elЕ‘fizetГ©s',
     // Romanian
-    'politica de confidențialitate', 'cookie-uri', 'consimțământ',
-    'condiții generale', 'date personale', 'abonament',
+    'politica de confidenИ›ialitate', 'cookie-uri', 'consimИ›ДѓmГўnt',
+    'condiИ›ii generale', 'date personale', 'abonament',
     // Turkish
-    'kişisel verilerin korunması', 'çerezler', 'onay',
-    'kullanım şartları', 'abone olma',
+    'kiЕџisel verilerin korunmasД±', 'Г§erezler', 'onay',
+    'kullanД±m ЕџartlarД±', 'abone olma',
     // Greek
-    'πολιτική απορρήου', 'cookie', 'συγκατάθεση',
-    'όροι χρήσης', 'προσωπικά δεδομένα',
+    'ПЂОїО»О№П„О№ОєО® О±ПЂОїПЃПЃО®ОїП…', 'cookie', 'ПѓП…ОіОєО±П„О¬ОёОµПѓО·',
+    'ПЊПЃОїО№ П‡ПЃО®ПѓО·П‚', 'ПЂПЃОїПѓП‰ПЂО№ОєО¬ ОґОµОґОїОјО­ОЅО±',
     // Arabic
-    'سياسة الخصوصية', 'ملفات ارتساعية', 'موافقة',
-    'شروط الاستخدام', 'بيانات شخصية',
+    'ШіЩЉШ§ШіШ© Ш§Щ„Ш®ШµЩ€ШµЩЉШ©', 'Щ…Щ„ЩЃШ§ШЄ Ш§Ш±ШЄШіШ§Ш№ЩЉШ©', 'Щ…Щ€Ш§ЩЃЩ‚Ш©',
+    'ШґШ±Щ€Ш· Ш§Щ„Ш§ШіШЄШ®ШЇШ§Щ…', 'ШЁЩЉШ§Щ†Ш§ШЄ ШґШ®ШµЩЉШ©',
     // Japanese
-    'プライバシーポリシー', 'クッキー', '同意', '利用規約', '個人データ',
+    'гѓ—гѓ©г‚¤гѓђг‚·гѓјгѓќгѓЄг‚·гѓј', 'г‚Їгѓѓг‚­гѓј', 'еђЊж„Џ', 'е€©з”Ёи¦Џзґ„', 'еЂ‹дєєгѓ‡гѓјг‚ї',
     // Korean
-    '개인정보 처리방침', '쿠키', '동의', '이용 약관',
+    'к°њмќём •ліґ мІл¦¬л°©м№Ё', 'мї н‚¤', 'лЏ™мќ', 'мќґмљ© м•ЅкґЂ',
     // Chinese (Simplified)
-    '隐私政策', 'cookie', '同意', '使用条款', '个人信息',
+    'йљђз§Ѓж”їз­–', 'cookie', 'еђЊж„Џ', 'дЅїз”ЁжќЎж¬ѕ', 'дёЄдєєдїЎжЃЇ',
     // Hindi
-    'गोपनीयता नीति', 'कूकीज', 'सहमति', 'उपयोग conditions', 'व्यक्तिगत डेटा',
+    'а¤—аҐ‹а¤Єа¤ЁаҐЂа¤Їа¤¤а¤ѕ а¤ЁаҐЂа¤¤а¤ї', 'а¤•аҐ‚а¤•аҐЂа¤њ', 'а¤ёа¤№а¤®а¤¤а¤ї', 'а¤‰а¤Єа¤ЇаҐ‹а¤— conditions', 'а¤µаҐЌа¤Їа¤•аҐЌа¤¤а¤їа¤—а¤¤ а¤ЎаҐ‡а¤џа¤ѕ',
     // Thai
-    'นโยบายความเป็นส่วนตัว', 'คุกกี้', 'การยินยอม', 'ข้อกำหนดการใช้',
+    'аё™а№‚аёўаёљаёІаёўаё„аё§аёІаёЎа№Ђаё›а№‡аё™аёЄа№€аё§аё™аё•аё±аё§', 'аё„аёёаёЃаёЃаёµа№‰', 'аёЃаёІаёЈаёўаёґаё™аёўаё­аёЎ', 'аё‚а№‰аё­аёЃаёіаё«аё™аё”аёЃаёІаёЈа№ѓаёЉа№‰',
     // Hebrew
-    'מדיניות פרטיות', 'עוגיות', 'הסכם', 'תנאי שירות',
+    'ЧћЧ“Ч™Ч Ч™Ч•ЧЄ Ч¤ЧЁЧЧ™Ч•ЧЄ', 'ЧўЧ•Ч’Ч™Ч•ЧЄ', 'Ч”ЧЎЧ›Чќ', 'ЧЄЧ ЧђЧ™ Ч©Ч™ЧЁЧ•ЧЄ',
   ];
   const matches = markers.filter((marker) => source.includes(marker)).length;
-  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy|политика|бисквитки|съгласие|правила|datenschutz|politique|privacidad|confidențialitate|kişisel|προσωπικά|سياسة|使用|개인|गोपनीयता|ความเป็น|מדיניות)/i.test(url);
+  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy|РїРѕР»РёС‚РёРєР°|Р±РёСЃРєРІРёС‚РєРё|СЃСЉРіР»Р°СЃРёРµ|РїСЂР°РІРёР»Р°|datenschutz|politique|privacidad|confidenИ›ialitate|kiЕџisel|ПЂПЃОїПѓП‰ПЂО№ОєО¬|ШіЩЉШ§ШіШ©|дЅїз”Ё|к°њмќё|а¤—аҐ‹а¤Єа¤ЁаҐЂа¤Їа¤¤а¤ѕ|аё„аё§аёІаёЎа№Ђаё›а№‡аё™|ЧћЧ“Ч™Ч Ч™Ч•ЧЄ)/i.test(url);
   return legalUrl || matches >= 2;
 }
 
@@ -406,9 +404,9 @@ async function getPageData(tabId) {
   try {
     let best = await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_PAGE_DATA', force_refresh: true });
 
-    // Филтрация: Търсим изрично маркери за съгласие/условия
+    // Р¤РёР»С‚СЂР°С†РёСЏ: РўСЉСЂСЃРёРј РёР·СЂРёС‡РЅРѕ РјР°СЂРєРµСЂРё Р·Р° СЃСЉРіР»Р°СЃРёРµ/СѓСЃР»РѕРІРёСЏ
     const legalScore = (value) => (
-      String(value || '').match(/cookie|cookies|куки|файлы куки|consent|соглас|personal data|персональн.{0,12}данн|advertising partner|similar technolog|terms|условия|conditions|privacy|конфиденциаль|policy|политик|legal|accept|принять|agree|согласен|acknowledge/gi) || []
+      String(value || '').match(/cookie|cookies|РєСѓРєРё|С„Р°Р№Р»С‹ РєСѓРєРё|consent|СЃРѕРіР»Р°СЃ|personal data|РїРµСЂСЃРѕРЅР°Р»СЊРЅ.{0,12}РґР°РЅРЅ|advertising partner|similar technolog|terms|СѓСЃР»РѕРІРёСЏ|conditions|privacy|РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊ|policy|РїРѕР»РёС‚РёРє|legal|accept|РїСЂРёРЅСЏС‚СЊ|agree|СЃРѕРіР»Р°СЃРµРЅ|acknowledge/gi) || []
     ).length;
 
     for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -418,11 +416,11 @@ async function getPageData(tabId) {
       if (legalScore(best?.text) >= 4 && (best?.consent_controls || []).length) break;
     }
 
-    // Изчистване на бутоните, които не отговарят на условия за съгласие
+    // РР·С‡РёСЃС‚РІР°РЅРµ РЅР° Р±СѓС‚РѕРЅРёС‚Рµ, РєРѕРёС‚Рѕ РЅРµ РѕС‚РіРѕРІР°СЂСЏС‚ РЅР° СѓСЃР»РѕРІРёСЏ Р·Р° СЃСЉРіР»Р°СЃРёРµ
     if (best?.consent_controls) {
       best.consent_controls = best.consent_controls.filter((ctrl) => {
         const text = (ctrl.text || ctrl.label || '').toLowerCase();
-        return /accept|agree|consent|allow|приемам|съгласен|позволи|cookie/i.test(text);
+        return /accept|agree|consent|allow|РїСЂРёРµРјР°Рј|СЃСЉРіР»Р°СЃРµРЅ|РїРѕР·РІРѕР»Рё|cookie/i.test(text);
       });
     }
 
@@ -448,12 +446,12 @@ async function toggleSiteStatus() {
     await chrome.storage.local.set({ disabledDomains: updated });
     window.location.reload();
   } catch (e) {
-    console.error('Не можа да се промени състоянието за сайта:', e);
+    console.error('РќРµ РјРѕР¶Р° РґР° СЃРµ РїСЂРѕРјРµРЅРё СЃСЉСЃС‚РѕСЏРЅРёРµС‚Рѕ Р·Р° СЃР°Р№С‚Р°:', e);
   }
 }
 
 async function initialize() {
-  showLoading('Analyzing Privacy & Cookie Policies...');
+  showLoading();
   try {
     await request('/api/health');
     setStatus(true);
@@ -474,39 +472,41 @@ async function initialize() {
       }
     }
 
-    // Use new async multi-layer extraction (zero-failure)
-    const page = tab?.id ? await getDocumentTextAsync(tab.id) : { text: '', trackers: [], consent_controls: [], legal_surface: false };
+    const page = tab?.id ? await getPageData(tab.id) : { text: '', trackers: [], consent_controls: [], legal_surface: false };
     state.text = page.text || '';
     state.trackers = page.trackers || [];
     state.consentControls = page.consent_controls || [];
     state.legalSurface = page.legal_surface === true;
 
-    // Zero-failure: ALWAYS proceed to analysis, never block on text length
+    if (state.text.trim().length < 30) {
+      showError(getUiError('noText'));
+      return;
+    }
+
+    if (!looksLikeLegalDocument(state.url, state.text) && !state.consentControls.length && !state.legalSurface) {
+      // Secondary AI check: classify via backend to catch multilingual/legal text
+      // that the word-based heuristic missed.
+      try {
+        const classifyResp = await request('/api/classify', {
+          method: 'POST',
+          body: JSON.stringify({ text: state.text.slice(0, 2000) }),
+        });
+
+        if (!classifyResp.is_legal) {
+          showError(getUiError('notLegal'), true);
+          return;
+        }
+      } catch {
+        // If the classify endpoint is unreachable, proceed with analysis
+        // (conservative: don't block potentially legal content).
+      }
+    }
+
     await analyzeCurrentPage();
   } catch (error) {
     setStatus(false);
     showError(getUiError('backendDown'));
     console.error('NexusKitty initialization failed:', error);
-  }
-}
-
-async function getDocumentTextAsync(tabId) {
-  try {
-    const result = await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_DOCUMENT_TEXT' });
-    if (result?.ok && result?.text) {
-      // Also get trackers and consent controls from the legacy payload
-      const legacy = await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_PAGE_DATA', force_refresh: true });
-      return {
-        text: result.text,
-        trackers: legacy?.trackers || [],
-        consent_controls: legacy?.consent_controls || [],
-        legal_surface: legacy?.legal_surface || false
-      };
-    }
-    return { text: '', trackers: [], consent_controls: [], legal_surface: false };
-  } catch (error) {
-    console.error('NexusKitty: Async document extraction failed:', error);
-    return { text: '', trackers: [], consent_controls: [], legal_surface: false };
   }
 }
 
@@ -542,32 +542,20 @@ function switchTab(tabName) {
 async function loadHistory() {
   try {
     const history = await request('/api/history?limit=5');
-    elements.history.innerHTML = history.length ? history.map((item, index) => {
+    elements.history.innerHTML = history.length ? history.map((item) => {
       const score = Number(item.safety_score) || 0;
       const label = item.safety_prediction || safetyLabel(score);
       const riskClass = score >= 65 ? 'safe' : score >= 40 ? 'warning' : 'danger';
       return `
-      <article class="history-item" data-index="${index}">
+      <article class="history-item">
         <div class="history-domain">${escapeHtml(item.domain || 'Unknown domain')}</div>
         <div class="history-score">
           <span class="history-score-badge ${riskClass}">${escapeHtml(label)}</span>
           <span class="history-score-num">${score}/100</span>
         </div>
-        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 400))}</div>
+        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 160))}</div>
       </article>
-      `;
-    }).join('') : '<div class="history-item">No scans yet.</div>';
-
-    // Attach click handlers so selecting a history entry shows its analysis
-    // in the main panel, like a promotional sweep through previous scans.
-    elements.history.querySelectorAll('.history-item').forEach((node) => {
-      node.addEventListener('click', () => {
-        const index = Number(node.dataset.index);
-        if (Number.isNaN(index) || !history[index]) return;
-        renderAnalysis(history[index]);
-        switchTab('analysis');
-      });
-    });
+    `).join('') : '<div class="history-item">No scans yet.</div>';
   } catch (error) {
     elements.history.innerHTML = '<div class="history-item">History is unavailable.</div>';
   }
@@ -588,7 +576,7 @@ function appendChat(role, text) {
   elements.chat.appendChild(message);
   elements.chat.scrollTop = elements.chat.scrollHeight;
 
-  // Track chat history for context — keep the full conversation alive
+  // Track chat history for context вЂ” keep the full conversation alive
   // so follow-up questions can reference earlier messages.
   state.chatHistory.push({
     sender: role === 'bot' ? 'assistant' : 'user',

@@ -21,15 +21,16 @@
     "default_popup": "popup/popup.html",
     "default_title": "NexusKitty",
     "default_icon": {
-      "128": "icons/icon128.png"
+      "128": "icons/icon_3D.png"
     }
   },
   "icons": {
-    "128": "icons/icon128.png"
+    "128": "icons/icon_3D.png"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "all_frames": true,
       "js": ["scripts/content.js"],
       "run_at": "document_idle"
     }

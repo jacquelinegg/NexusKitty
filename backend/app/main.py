@@ -478,6 +478,11 @@ async def analyze_tos(
 
             analysis_result.semantic_diff = {
                 "has_changed": False,
+                "previous_date": (
+                    previous_snapshot.get(
+                        "created_at"
+                    )
+                ),
                 "changes": [],
             }
 
