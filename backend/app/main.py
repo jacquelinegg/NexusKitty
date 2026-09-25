@@ -217,6 +217,11 @@ def is_recently_counted(
 
     The comparison uses normalized URLs.
 
+    NOTE: kept for reference / potential reuse elsewhere. The main
+    analyze_tos() flow no longer uses this to silently SKIP a
+    revisit - see the MRU reorder logic in step 9 below, which
+    replaced the old skip-without-reordering behaviour.
+
     """
 
     current_url = normalize_page_url(url)
@@ -270,6 +275,9 @@ async def is_page_in_recent_top_five(
     This makes the duplicate protection work even if Supabase
 
     is unavailable or its data is temporarily incomplete.
+
+    NOTE: kept for reference / potential reuse elsewhere; no longer
+    called from analyze_tos() (see step 9 below).
 
     """
 
@@ -1140,67 +1148,50 @@ async def analyze_tos(
 
         # =====================================================
 
-        # 9. Persist only successful analyses
-
+        # 9. Persist / reorder history entries (MRU)
         #
-
-        # IMPORTANT:
-
+        # IMPORTANT - MRU (most-recently-used) behaviour:
         #
-
-        # The same page is NOT counted again if it is already
-
-        # among the latest 5 unique pages.
-
+        # Every time a page is analyzed - whether it's a brand-new
+        # page, or a page whose ToS/Privacy text hasn't changed
+        # since an earlier visit (even a much earlier one, already
+        # outside the visible window) - it must be bumped to the
+        # FRONT (most-recent) position of the history the user sees.
         #
-
-        # Once it falls outside those 5, it can be counted again.
-
+        # FIX: the previous version silently `return`ed early on a
+        # content-hash duplicate WITHOUT touching in_memory_history
+        # or asking the DB to reorder anything. That meant a
+        # revisited page whose content hadn't changed just stayed
+        # wherever it originally was (or fell out of view entirely)
+        # instead of jumping back to the top - e.g. with a window of
+        # [6,1,2,3,4], revisiting "5" (unchanged content, already
+        # outside the window) never came back as [5,6,1,2,3].
+        #
+        # Now: the in-memory list always has this URL's entry moved
+        # to the newest slot. A brand-new DB row (+ ToS history
+        # snapshot) is only written when the content actually
+        # changed or has never been seen before; for an unchanged
+        # revisit we ask db_service to bump the EXISTING row's
+        # recency instead of duplicating it.
         # =====================================================
 
         if analysis_result.analysis_available:
 
-            already_recent = (
+            normalized_url = normalize_page_url(request.url)
 
-                await is_page_in_recent_top_five(
+            # ---- MRU bump: in-memory history ----
+            # Drop any existing entry for this exact page, then
+            # re-append the current result so it lands in the
+            # most-recent slot (get_history() reverses this list).
+            in_memory_history[:] = [
+                item for item in in_memory_history
+                if normalize_page_url(get_result_url(item)) != normalized_url
+            ]
+            in_memory_history.append(analysis_result)
+            if len(in_memory_history) > MAX_IN_MEMORY_HISTORY:
+                in_memory_history.pop(0)
 
-                    request.url
-
-                )
-
-            )
-
-            if already_recent:
-
-                logger.info(
-
-                    "Recent duplicate ignored: "
-
-                    f"{normalize_page_url(request.url)}"
-
-                )
-
-                # Do not create another history entry.
-
-                # Do not create another DB record.
-
-                #
-
-                # The analysis itself is still returned to the
-
-                # frontend so the user can see the result.
-
-                return analysis_result
-
-            # =================================================
-
-            # Content-hash dedup: prevent duplicate records when the
-            # same page content is re-analyzed (e.g. after iframe
-            # consent relay) even if the page is no longer in the
-            # recent top-5.
-
-            # =================================================
-
+            # ---- Has this exact content already been saved for this URL? ----
             already_same_content = False
 
             try:
@@ -1211,51 +1202,53 @@ async def analyze_tos(
                 logger.warning("Content-hash dedup check failed: %s", hash_err)
 
             if already_same_content:
+
                 logger.info(
-
-                    "Content-hash duplicate ignored: "
-
-                    f"{normalize_page_url(request.url)}"
-
+                    "Content-hash duplicate: bumping recency without a new DB row: %s",
+                    normalized_url,
                 )
 
+                # Best-effort: bump this URL's existing row to the
+                # front of the DB-backed history too, without
+                # creating a duplicate record. If db_service doesn't
+                # implement this method yet, the in-memory reorder
+                # above still keeps this session's fallback view
+                # correct, but /api/history will keep showing the
+                # DB's stale order until touch_analysis_recency() is
+                # added to db_service.py (bump the row's created_at
+                # / order column to now() for this url, no new row).
+                try:
+                    await db_service.touch_analysis_recency(request.url)
+                except AttributeError:
+                    logger.warning(
+                        "db_service.touch_analysis_recency() is not implemented - "
+                        "DB-backed history order will not reflect this revisit "
+                        "until it is added."
+                    )
+                except Exception as touch_err:
+                    logger.warning(
+                        "Failed to bump recency for %s: %s",
+                        normalized_url,
+                        touch_err,
+                    )
+
+                # The analysis itself is still returned to the
+                # frontend so the user can see the result.
                 return analysis_result
 
             # =================================================
 
-            # New page for the recent TOP 5
+            # Genuinely new/changed content: persist normally
 
             # =================================================
 
             logger.info(
 
-                "New page added to recent history: "
+                "New/changed page saved to history: "
 
-                f"{normalize_page_url(request.url)}"
-
-            )
-
-            # Always keep an in-memory copy so /api/history
-
-            # works even when Supabase writes are blocked
-
-            # by Row Level Security.
-
-            in_memory_history.append(
-
-                analysis_result
+                f"{normalized_url}"
 
             )
-
-            if (
-
-                len(in_memory_history)
-
-                > MAX_IN_MEMORY_HISTORY
-
-            ):
-
-                in_memory_history.pop(0)
 
             # =================================================
 

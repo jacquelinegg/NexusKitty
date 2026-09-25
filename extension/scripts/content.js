@@ -57,6 +57,29 @@ const NO_CONTENT_FALLBACK_PREFIX = 'Legal analysis fallback for site: ';
 const fetchedLegalPageCache = new Map();
 const FETCHED_PAGE_CACHE_TTL = 20000; // 20s comfortably covers one popup session
 
+// FIX: same problem existed for translateTextToEnglish() — it had NO
+// caching at all, so every one of popup.js's up-to-6 force_refresh polling
+// ticks re-translated the same extracted text from scratch via the
+// Google Translate endpoint (chrome.runtime -> NEXUSKITTY_TRANSLATE_TEXT
+// -> the "single?client=gtx&sl=auto&tl=en..." requests visible in the
+// Network tab). Give it the same short-TTL, signature-keyed cache the
+// legal-page fetcher already uses, so repeated polling ticks against the
+// same extracted text reuse the previous translation instead of hitting
+// the network again.
+const translationCache = new Map();
+const TRANSLATION_CACHE_TTL = 20000; // matches FETCHED_PAGE_CACHE_TTL
+
+// FIX: moved out of extractMainText() (where it was a local closure) to
+// module scope so it can be shared by translateTextToEnglish()'s cache
+// key as well, instead of duplicating the same hashing logic twice.
+function textSignature(text) {
+  if (!text) return '';
+  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i += 1) hash = (hash * 31 + normalized.charCodeAt(i)) >>> 0;
+  return hash.toString(36);
+}
+
 const LEGAL_URL_KEYWORDS = [
   'terms', 'conditions', 'privacy', 'cookie', 'policy', 'legal', 'gdpr',
   'datenschutz', 'einwilligung', 'nutzungs', 'politique', 'consentement',
@@ -433,16 +456,46 @@ async function readDomainLegalCache(origin) {
 async function writeDomainLegalCache(origin, urls) {
   try { const key = DOMAIN_LEGAL_CACHE_PREFIX + origin; await chrome.storage.local.set({ [key]: { timestamp: Date.now(), urls } }); } catch (error) {}
 }
+// FIX: chrome.storage.local-backed readDomainLegalCache/writeDomainLegalCache
+// was supposed to stop discoverDomainLegalLinks() from re-crawling the
+// domain's homepage + legal pages on every force_refresh call, but on
+// sites where the on-disk cache read is slow, races, or misses for any
+// reason (redirect chains changing window.location.origin between calls,
+// storage write not yet flushed, etc.), every miss falls straight back to
+// a REAL network crawl via background.js - which is exactly the endless
+// "winbet.bg / cookie / privacy-policy / terms-of-use" loop seen in the
+// Network tab. Add a same-page-load, in-memory backstop that is NOT
+// subject to any of those failure modes: once this content script
+// instance has discovered (or failed to discover) legal links for the
+// current origin, never ask background.js again for the rest of this
+// page load, no matter what chrome.storage does.
+let sessionDiscoveredLegalLinks = null; // { origin, urls } | null
+
 async function discoverDomainLegalLinks() {
   const origin = window.location.origin;
+
+  if (sessionDiscoveredLegalLinks && sessionDiscoveredLegalLinks.origin === origin) {
+    return sessionDiscoveredLegalLinks.urls;
+  }
+
   const cached = await readDomainLegalCache(origin);
-  if (cached !== null) return cached;
+  if (cached !== null) {
+    sessionDiscoveredLegalLinks = { origin, urls: cached };
+    return cached;
+  }
   try {
     const response = await chrome.runtime.sendMessage({ type: 'NEXUSKITTY_DISCOVER_LEGAL_URLS', origin });
     const urls = response?.ok && Array.isArray(response.urls) ? response.urls : [];
     await writeDomainLegalCache(origin, urls);
+    sessionDiscoveredLegalLinks = { origin, urls };
     return urls;
-  } catch (error) { return []; }
+  } catch (error) {
+    // FIX: cache the failure too (empty result) for this page load, so a
+    // persistently failing background.js call doesn't get retried on
+    // every single force_refresh tick either.
+    sessionDiscoveredLegalLinks = { origin, urls: [] };
+    return [];
+  }
 }
 function scoreLegalImportance(href, text) {
   let score = 0;
@@ -659,12 +712,6 @@ async function extractMainText() {
     }
   }
 
-  function textSignature(text) {
-    if (!text) return ''; const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
-    let hash = 0; for (let i = 0; i < normalized.length; i += 1) hash = (hash * 31 + normalized.charCodeAt(i)) >>> 0;
-    return hash.toString(36);
-  }
-
   let fetchedPagesText = '';
   let fetchedMeta = [];
   if (legalLinks.length > 0) {
@@ -866,9 +913,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 function createConsentHud(button) {
   if (!button) return; if (button.querySelector('.nexuskitty-consent-hud')) return;
-  const existingHud = button.parentElement?.querySelector('.nexuskitty-consent-hud'); if (existingHud) return;
-  const warning = document.createElement('div'); warning.className = 'nexuskitty-consent-hud'; warning.textContent = 'NK';
-  warning.style.cssText = `display: inline-block; position: absolute; top: -9px; right: -7px; margin: 0; padding: 2px 5px; border-radius: 2px; font-size: 9px; line-height: 1; font-weight: 700; letter-spacing: 0.03em; color: #f4dfad; background: #302a24; border: 1px solid rgba(218, 174, 88, 0.65); box-shadow: 0 1px 5px rgba(0, 0, 0, 0.22); z-index: 999999; pointer-events: none;`;
   const parent = button.parentElement; if (!parent) return;
   if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative'; parent.appendChild(warning);
 }
@@ -894,9 +938,29 @@ async function pruneExpiredCache() {
 }
 async function translateTextToEnglish(text) {
   if (!text || !text.trim()) return { text: text || '', detectedLang: null, translated: false };
+
+  // FIX: cache by content signature (not by full text, to keep the map
+  // key small) so repeated calls with the SAME extracted text within a
+  // short window reuse the previous translation instead of re-hitting
+  // the Google Translate endpoint. This is what stopped the repeated
+  // "single?client=gtx&sl=auto&tl=en..." requests seen in the Network
+  // tab during popup.js's force_refresh polling loop.
+  const cacheKey = textSignature(text);
+  const cachedEntry = translationCache.get(cacheKey);
+  if (cachedEntry && Date.now() - cachedEntry.timestamp < TRANSLATION_CACHE_TTL) {
+    console.log('NexusKitty [CACHE]: reusing translation for unchanged text');
+    return cachedEntry.result;
+  }
+
   try {
     const response = await chrome.runtime.sendMessage({ type: 'NEXUSKITTY_TRANSLATE_TEXT', text });
-    if (response?.ok && response.text) return { text: response.text, detectedLang: response.detectedLang || null, translated: response.translated === true };
+    if (response?.ok && response.text) {
+      const result = { text: response.text, detectedLang: response.detectedLang || null, translated: response.translated === true };
+      // Only cache genuine successes, same rationale as fetchLegalPageText:
+      // a transient failure should still be retryable on the next tick.
+      translationCache.set(cacheKey, { result, timestamp: Date.now() });
+      return result;
+    }
   } catch (error) {}
   return { text, detectedLang: null, translated: false };
 }
@@ -946,10 +1010,32 @@ async function extractDocumentTextAsync() {
 // force_refresh:false caller still short-circuits via the normal
 // readPageCache() path above and never touches the lock.
 //
-// Combined with the fetchedLegalPageCache above (which now also protects
-// SEQUENTIAL, non-overlapping calls), popup.js's 6x polling loop no
-// longer causes 6x network traffic for the same legal pages.
+// Combined with the fetchedLegalPageCache and translationCache above
+// (which now also protect SEQUENTIAL, non-overlapping calls), popup.js's
+// 6x polling loop no longer causes 6x network traffic for the same legal
+// pages or the same translation.
 let inFlightBuildPromise = null;
+
+// FIX: even with per-URL caches (fetchedLegalPageCache, translationCache)
+// and the in-flight guard above, nothing previously stopped SEPARATE,
+// SEQUENTIAL force_refresh:true callers - popup.js's own polling loop
+// (up to ~7 calls, 350ms apart) PLUS scheduleReanalysisAfterIframeRelay()
+// firing independently up to 3 times as a Cookiebot iframe reports
+// growing consent text - from each triggering a brand new, full
+// extractMainText() pass back-to-back. If any per-URL cache happens to
+// miss for a given site (different origin after a redirect, a
+// cache-busting query param, a slow chrome.storage read, etc.) that
+// compounds into exactly the runaway request loop seen in the Network
+// tab (repeated cookie/privacy-policy/terms-of-use/homepage fetches).
+//
+// This is a hard, root-cause-agnostic backstop: no matter WHY a
+// lower-level cache misses, buildPagePayload will not re-run the full
+// extraction pipeline more often than once per MIN_REEXTRACTION_INTERVAL_MS,
+// for ANY reason a force_refresh comes in (polling or iframe relay).
+// Callers that hit the throttle just get the most recent payload back.
+let lastExtractionAt = 0;
+let lastExtractionPayload = null;
+const MIN_REEXTRACTION_INTERVAL_MS = 1500;
 
 async function buildPagePayload(forceRefresh = false) {
   if (!forceRefresh) {
@@ -958,6 +1044,15 @@ async function buildPagePayload(forceRefresh = false) {
   }
 
   if (inFlightBuildPromise) return inFlightBuildPromise;
+
+  if (
+    forceRefresh &&
+    lastExtractionPayload &&
+    Date.now() - lastExtractionAt < MIN_REEXTRACTION_INTERVAL_MS
+  ) {
+    console.log('NexusKitty [THROTTLE]: skipping re-extraction, returning last payload');
+    return lastExtractionPayload;
+  }
 
   inFlightBuildPromise = (async () => {
     try {
@@ -979,6 +1074,11 @@ async function buildPagePayload(forceRefresh = false) {
       const trackers = detectTrackers(); const consentControls = getConsentSnapshot(); const legalSurface = hasLegalSurface();
       const payload = { text, analysis_text: analysisText, detected_language: detectedLanguage, translated: wasTranslated, trackers, detected_trackers: trackers, consent_controls: consentControls, legal_surface: legalSurface, url: window.location.href, hostname: window.location.hostname, title: document.title || '' };
       if (!isFallback) await writePageCache(payload);
+      // FIX: record every completed extraction (fallback or not) so the
+      // throttle above has something recent to hand back to the next
+      // force_refresh caller instead of re-running the whole pipeline.
+      lastExtractionAt = Date.now();
+      lastExtractionPayload = payload;
       return payload;
     } finally {
       inFlightBuildPromise = null;
@@ -992,8 +1092,6 @@ async function applyRiskWarning(categories, shouldWarn) {
   if (isDomainDisabledSync()) { removeRiskOutlines(); return; }
   if (!shouldWarn) { removeRiskOutlines(); return; }
   findConsentButtons().forEach((button) => {
-    button.style.outline = '3px solid #ff304f';
-    button.style.boxShadow = '0 0 0 4px rgba(255, 48, 79, 0.28), 0 0 18px rgba(255, 48, 79, 0.8)';
     button.title = 'WARNING: Clicking this may accept risky data or privacy terms.';
     createConsentHud(button);
   });
