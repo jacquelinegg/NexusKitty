@@ -6,19 +6,6 @@ chrome.runtime.onInstalled.addListener(() => {
 
 /* =========================================================
    LEGAL PAGE FETCH RELAY
-   ---------------------------------------------------------
-   Content scripts run inside the visited page's execution
-   context, so their fetch() calls are bound by that page's
-   own Content-Security-Policy (connect-src etc). Many sites
-   with cookie-consent managers (OneTrust, Cookiebot...) set
-   a strict CSP that silently blocks cross-origin fetch from
-   the content script - even though the extension itself has
-   <all_urls> host_permissions.
-
-   The service worker is NOT bound by any page's CSP, only by
-   this extension's own host_permissions. So all cross-origin
-   fetches of linked Privacy/Terms/Cookie pages are relayed
-   here instead of being done directly in content.js.
    ========================================================= */
 
 async function fetchLegalUrl(url) {
@@ -26,18 +13,31 @@ async function fetchLegalUrl(url) {
   const timeoutId = setTimeout(() => controller.abort(), 6000);
 
   try {
+    // FIX: added `cache: 'no-store'`. Without it, the browser's HTTP
+    // cache serves a conditional revalidation on the 2nd/3rd/... fetch of
+    // the same URL within one analysis session (popup.js polls
+    // NEXUSKITTY_GET_PAGE_DATA with force_refresh up to 6 times). The
+    // server then legitimately answers with 304 Not Modified - which has
+    // NO body - and fetch() treats any non-200..299 status (304 included)
+    // as response.ok === false. That made every re-fetch after the first
+    // one silently return an EMPTY string for legal pages already fetched
+    // once, so later analysis attempts lost the real Privacy/Cookie/Terms
+    // text entirely (this is what happened on extradigital.co.uk).
     const response = await fetch(url, {
       credentials: 'omit',
       redirect: 'follow',
+      cache: 'no-store',
       signal: controller.signal,
     });
 
+    const contentType = response.headers.get('content-type') || '';
+
     if (!response.ok) {
-      return { html: '', status: response.status, finalUrl: response.url };
+      return { html: '', status: response.status, finalUrl: response.url, contentType };
     }
 
     const html = await response.text();
-    return { html, status: response.status, finalUrl: response.url };
+    return { html, status: response.status, finalUrl: response.url, contentType };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -45,32 +45,10 @@ async function fetchLegalUrl(url) {
 
 /* =========================================================
    TRANSLATION RELAY
-   ---------------------------------------------------------
-   content.js extracts page text in whatever language the
-   visited site uses. Rather than teaching the analysis
-   backend to understand every language, we translate the
-   extracted text to English here (same CSP-avoidance reason
-   as fetchLegalUrl above: the service worker isn't bound by
-   the visited page's CSP, so it can reach a translation
-   endpoint even on sites that would block it from content.js).
-
-   NOTE: This currently calls Google's public, unauthenticated
-   translate endpoint (translate.googleapis.com). It's free and
-   needs no API key, but it's undocumented/unofficial, rate
-   limited, and can change or break without notice. If that
-   becomes a problem in production, swap TRANSLATE_ENDPOINT_URL
-   below (and the response parsing in translateChunk) for the
-   official Google Cloud Translation API or another provider -
-   that will need an API key stored via chrome.storage or a
-   build-time secret, not hardcoded here.
-
-   Also make sure the manifest's host_permissions cover
-   https://translate.googleapis.com/* (already satisfied if the
-   manifest uses <all_urls>, as fetchLegalUrl above assumes).
    ========================================================= */
 
 const TRANSLATE_TARGET_LANG = 'en';
-const TRANSLATE_CHUNK_SIZE = 4500; // stay under the endpoint's ~5000 char query limit
+const TRANSLATE_CHUNK_SIZE = 4500;
 const TRANSLATE_TIMEOUT_MS = 8000;
 
 function splitIntoTranslationChunks(text, maxLen) {
@@ -143,11 +121,6 @@ async function translateToEnglish(text) {
     return { text: text || '', detectedLang: null, translated: false };
   }
 
-  // Already English source pages still get sent through the endpoint once
-  // (cheap) so detectedLang is populated consistently; skipping detection
-  // heuristics here avoids misclassifying non-English Latin-script text
-  // (French, Spanish, Bulgarian transliterations, etc.) as English.
-
   const chunks = splitIntoTranslationChunks(text, TRANSLATE_CHUNK_SIZE);
   const translatedParts = [];
   let detectedLang = null;
@@ -175,28 +148,6 @@ async function translateToEnglish(text) {
 
 /* =========================================================
    DOMAIN-LEVEL LEGAL PAGE DISCOVERY
-   ---------------------------------------------------------
-   FIX: NEW. findLegalLinks() in content.js only ever looked
-   at <a href> elements present in the CURRENT page's DOM. On
-   a page with no footer link matching a legal keyword and no
-   open consent popup (e.g. a homepage whose footer nav is
-   collapsed behind JS, or a random inner page like a
-   dictionary search result), nothing was ever found, and
-   extractMainText()/extractDocumentTextAsync() fell all the
-   way through to junk (raw <noscript> GTM markup, or the
-   literal "Legal analysis fallback for site: X" placeholder).
-
-   This block adds a domain-scoped discovery step that runs
-   from the service worker (same CSP-avoidance reasoning as
-   fetchLegalUrl above) and tries, in order:
-     1. robots.txt -> Sitemap: entries -> sitemap.xml <loc> URLs
-        that look like legal pages.
-     2. A short list of well-known legal-page URL slugs,
-        fetched in parallel and lightly validated by checking
-        their <title>/<h1> against the same keyword list.
-   Results are meant to be cached per-domain by content.js so
-   this only runs once per site per cache TTL, not on every
-   page load.
    ========================================================= */
 
 const LEGAL_URL_KEYWORDS_BG = [
@@ -213,10 +164,12 @@ const LEGAL_URL_KEYWORDS_BG = [
 
 const LEGAL_KEYWORDS_REGEX = new RegExp(LEGAL_URL_KEYWORDS_BG.join('|'), 'i');
 
-// Root-relative slugs to probe when nothing else worked. Kept intentionally
-// short (favoring the most common English + Bulgarian-Latin forms already
-// observed in the wild, e.g. runners.bg's own "/Politika-za-biskvitki")
-// to bound the number of speculative requests per undiscovered domain.
+// FIX: added — reject list for asset/script URLs that merely happen to
+// contain a legal-sounding word in their filename (e.g. a bundled
+// "cookie-consent.min.js"). Without this, a JS file could be picked up
+// by the sitemap scan and be analyzed as if it were the legal page.
+const NON_HTML_ASSET_PATTERN = /\.(js|mjs|cjs|json|css|png|jpe?g|gif|svg|webp|woff2?|ttf|map)(\?|#|$)/i;
+
 const LEGAL_PATH_SLUGS = [
   'privacy', 'privacy-policy', 'privacy_policy',
   'terms', 'terms-of-service', 'terms-of-use', 'terms-and-conditions',
@@ -238,9 +191,11 @@ async function fetchTextWithTimeout(url, timeoutMs = DISCOVERY_FETCH_TIMEOUT_MS)
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // FIX: same `cache: 'no-store'` reasoning as fetchLegalUrl above.
     const response = await fetch(url, {
       credentials: 'omit',
       redirect: 'follow',
+      cache: 'no-store',
       signal: controller.signal,
     });
 
@@ -273,7 +228,7 @@ async function discoverViaSitemap(origin) {
 
   const sitemapUrls = [...robotsText.matchAll(/^sitemap:\s*(\S+)/gim)]
     .map((match) => match[1])
-    .slice(0, 2); // cap: don't crawl an unbounded number of sitemaps
+    .slice(0, 2);
 
   const found = [];
 
@@ -285,6 +240,9 @@ async function discoverViaSitemap(origin) {
       .map((match) => match[1].trim());
 
     for (const locUrl of locUrls) {
+      // FIX: skip .js/.css/image/etc. assets even if their path happens
+      // to contain a legal keyword.
+      if (NON_HTML_ASSET_PATTERN.test(locUrl)) continue;
       if (LEGAL_KEYWORDS_REGEX.test(locUrl)) {
         found.push(locUrl);
       }
@@ -340,24 +298,6 @@ async function discoverLegalUrls(originUrl) {
 
 /* =========================================================
    CROSS-ORIGIN CMP IFRAME -> TOP FRAME RELAY
-   ---------------------------------------------------------
-   FIX: This whole block was previously missing entirely.
-
-   content.js runs in EVERY frame of the page (all_frames: true
-   in the manifest), including cross-origin CMP iframes (e.g.
-   Sourcepoint's "Notice Message App"). The instance running
-   INSIDE that iframe can see the fully JS-rendered banner text
-   (the top frame cannot, due to the Same-Origin Policy), so it
-   sends it here as NEXUSKITTY_IFRAME_CONSENT_TEXT.
-
-   Without this handler, that message was silently dropped
-   (the listener below fell through to `return false` for any
-   unrecognized type), so the top frame's `receivedIframeConsentText`
-   variable was NEVER populated, no matter what content.js did
-   with it downstream. This handler forwards the text down to the
-   TOP frame of the same tab (frameId 0) as
-   NEXUSKITTY_IFRAME_CONSENT_TEXT_RELAY, which is what content.js's
-   top-frame instance actually listens for.
    ========================================================= */
 
 async function relayIframeConsentTextToTopFrame(message, sender) {
@@ -368,9 +308,6 @@ async function relayIframeConsentTextToTopFrame(message, sender) {
     return;
   }
 
-  // Don't bother relaying a message that already came from the top frame
-  // (sender.frameId === 0) - only genuine cross-origin child iframes need
-  // this relay; a top-frame consent popup is already visible to itself.
   if (sender.frameId === 0) {
     return;
   }
@@ -383,44 +320,12 @@ async function relayIframeConsentTextToTopFrame(message, sender) {
         text: message.text || '',
         frameUrl: message.frameUrl || sender.url || '',
       },
-      { frameId: 0 } // top frame only
+      { frameId: 0 }
     );
   } catch (error) {
-    // Common and harmless: top frame's content script may not be ready yet,
-    // or the tab may have navigated away. Don't spam the console.
     console.debug('NexusKitty: could not relay iframe consent text to top frame.', error?.message || error);
   }
 }
-
-/* =========================================================
-   FORCED RE-ANALYSIS AFTER IFRAME RELAY
-   ---------------------------------------------------------
-   content.js's top frame calls this (NEXUSKITTY_PAGE_DATA_UPDATED)
-   after it rebuilds its page payload in response to newly-arrived
-   iframe consent text, so the backend can re-analyze the page with
-   the now-complete banner text and push a fresh verdict back down
-   as NEXUSKITTY_ANALYSIS_RESULT.
-
-   TODO: Wire this to whatever function currently calls the
-   nexuskitty.onrender.com (or localhost:8000) backend and turns the
-   response into { categories, should_warn } - that logic isn't in
-   this file yet (it looks like it currently lives in popup.js and
-   only runs when the popup is opened). Once that function is
-   available here, replace the console.debug below with a real call,
-   e.g.:
-     const result = await analyzeWithBackend(message.payload);
-     await chrome.tabs.sendMessage(tabId, {
-       type: 'NEXUSKITTY_ANALYSIS_RESULT',
-       categories: result.categories,
-       should_warn: result.should_warn,
-     }, { frameId: 0 });
-
-   IMPORTANT: when that backend call is wired in, send
-   message.payload.analysis_text (the English-translated text) to
-   the backend, not message.payload.text (the original-language
-   text) - see the TRANSLATION RELAY block above and the
-   analysis_text field content.js now adds to every payload.
-   ========================================================= */
 
 async function handlePageDataUpdated(message, sender) {
   const tabId = sender?.tab?.id;
@@ -433,9 +338,6 @@ async function handlePageDataUpdated(message, sender) {
     'NexusKitty: received updated page payload after iframe relay (backend re-analysis not yet wired up here):',
     { url: message?.payload?.url, textLength: message?.payload?.text?.length }
   );
-
-  // Stub only - see TODO above. Left as a no-op so this doesn't silently
-  // pretend to succeed; wire in the real backend call here.
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -453,10 +355,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     fetchLegalUrl(message.url)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
-    return true; // keep the message channel open for the async response
+    return true;
   }
 
-  // Translate arbitrary extracted page text to English before analysis.
   if (message && message.type === 'NEXUSKITTY_TRANSLATE_TEXT') {
     translateToEnglish(message.text || '')
       .then((result) => sendResponse({ ok: true, ...result }))
@@ -464,8 +365,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // FIX: relay consent text detected inside a cross-origin CMP iframe up to
-  // that tab's top frame.
   if (message && message.type === 'NEXUSKITTY_IFRAME_CONSENT_TEXT') {
     relayIframeConsentTextToTopFrame(message, sender)
       .then(() => sendResponse({ ok: true }))
@@ -473,8 +372,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // FIX: top frame notifying us that it rebuilt its payload after receiving
-  // relayed iframe text, so we can (eventually) re-run backend analysis.
   if (message && message.type === 'NEXUSKITTY_PAGE_DATA_UPDATED') {
     handlePageDataUpdated(message, sender)
       .then(() => sendResponse({ ok: true }))
@@ -482,10 +379,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // FIX: NEW. Domain-level legal-page discovery (sitemap + well-known
-  // path guessing) for pages where no legal link could be found in the
-  // current page's own DOM. See the DOMAIN-LEVEL LEGAL PAGE DISCOVERY
-  // block above.
   if (message && message.type === 'NEXUSKITTY_DISCOVER_LEGAL_URLS') {
     discoverLegalUrls(message.origin)
       .then((urls) => sendResponse({ ok: true, urls }))
