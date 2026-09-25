@@ -10,247 +10,364 @@ const MAX_TEXT_LENGTH = 9000;
 const MAX_LEGAL_LINKS = 5;
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 const HUD_UPDATE_DELAY = 350;
-const BANNER_BUDGET = 1500; // max chars for banner/local text, so linked policies still fit
+const BANNER_BUDGET = 1500;
 const CACHE_PREFIX = 'nk_cache_v4_';
+// FIX: NEW. Domain-scoped cache for the legal URLs discovered via
+// background.js's sitemap/path-guessing pipeline (see
+// discoverDomainLegalLinks() below). Keyed per-origin so every other page
+// on the same site reuses the result instead of re-discovering it.
+const DOMAIN_LEGAL_CACHE_PREFIX = 'nk_domain_legal_v1_';
+const DOMAIN_LEGAL_CACHE_TTL = 24 * 60 * 60 * 1000;
+// A page that reached the very bottom of the extraction pipeline with
+// nothing usable gets this exact placeholder (see
+// extractDocumentTextAsync() below). It must never be treated as real
+// document text - see the isFallback checks in buildPagePayload().
+const NO_CONTENT_FALLBACK_PREFIX = 'Legal analysis fallback for site: ';
 const LEGAL_URL_KEYWORDS = [
-  // English
   'terms', 'conditions', 'privacy', 'cookie', 'policy', 'legal', 'gdpr',
-  // German
   'datenschutz', 'einwilligung', 'nutzungs',
-  // French
   'politique', 'consentement',
-  // Spanish
   'privacidad', 'consentimiento', 'condiciones',
-  // Portuguese
   'privacidade', 'consentimento', 'condições',
-  // Bulgarian
-  'правила', 'поверителност', 'бисквитки', 'съгласие',
-  // Russian
+  'правила', 'поверителност', 'бисквитки', 'съгласие', 'лични данни',
+  'декларация', 'защита на данни', 'условия за ползване', 'политика за',
   'правила', 'политика', 'согласие',
-  // Ukrainian
   'політика', 'згода',
-  // Turkish
   'kişisel', 'çerez', 'onay', 'şartları',
-  // Arabic
   'سياسة', 'خصوصية', 'موافقة',
-  // Japanese
   'プライバシー', '同意', '利用規約',
-  // Korean
   '개인정보', '동의', '이용',
-  // Chinese
   '隐私', '同意', '使用条款',
-  // Hindi
   'गोपनीयता', 'सहमति',
-  // Thai
   'ความเป็น', 'การยินยอม',
-  // Hebrew
   'פרטיות', 'הסכם',
-  // Greek
   'προσωπικά', 'συγκατάθεση',
-  // Polish
   'prywatność', 'ciasteczka', 'zgoda',
-  // Czech
   'osobní', 'souhlas', 'podmínky',
 ];
 
 const LEGAL_PAGE_REGEX = new RegExp(LEGAL_URL_KEYWORDS.join('|'), 'i');
 const LEGAL_URL_REGEX = new RegExp(LEGAL_URL_KEYWORDS.join('|'), 'i');
 
-/*
- * Selectors for cookie-consent overlays, modal dialogs, and CMP widgets
- * that should ALWAYS be excluded from the scraped document text.
- */
-const CMP_OVERLAY_SELECTORS = [
-  '[id*="onetrust" i]',
-  '[class*="onetrust" i]',
-  '[id*="didomi" i]',
-  '[class*="didomi" i]',
-  '[id*="cookielaw" i]',
-  '[class*="cookielaw" i]',
-  '[id*="cmp" i]',
-  '[class*="cmp" i]',
-  '[id*="trustarc" i]',
-  '[class*="trustarc" i]',
-  '[id*="evidon" i]',
-  '[class*="evidon" i]',
-  '[id*="quantcast" i]',
-  '[class*="quantcast" i]',
-  '[id*="cybot" i]',
-  '[class*="cybot" i]',
-  '[id*="usercentrics" i]',
-  '[class*="usercentrics" i]',
-  '[id*="sp_message" i]',
-  '[class*="sp_message" i]',
-  '[id*="iubenda" i]',
-  '[class*="iubenda" i]',
-  '[id*="termly" i]',
-  '[class*="termly" i]',
-  '[id*="cookie-script" i]',
-  '[class*="cookie-script" i]',
-  '[id*="axeptio" i]',
-  '[class*="axeptio" i]',
-  '[id*="fg-modal" i]',
-  '[class*="fg-modal" i]',
-  '[id*="cookie-banner" i]',
-  '[class*="cookie-banner" i]',
-  '[id*="consent-banner" i]',
-  '[class*="consent-banner" i]',
-  '[id*="cookie-wall" i]',
-  '[class*="cookie-wall" i]',
-  '[id*="modal-overlay" i]',
-  '[class*="modal-overlay" i]',
-  '[id*="lightbox" i]',
-  '[class*="lightbox" i]',
-  '[id*="backdrop" i]',
-  '[class*="backdrop" i]',
-  '[id*="flyout" i]',
-  '[class*="flyout" i]',
-  '[id*="drawer" i]',
-  '[class*="drawer" i]',
-  '[id*="interstitial" i]',
-  '[class*="interstitial" i]',
-  '[id*="takeover" i]',
-  '[class*="takeover" i]',
-  '[id*="sheet" i]',
-  '[class*="sheet" i]',
-  '[class*="overlay" i]',
-  '[class*="modal" i]',
-  '[class*="dialog" i]',
-  '[class*="popup" i]',
-  '[id*="modal" i]',
-  '[id*="dialog" i]',
-  '[id*="popup" i]',
-  '[class*="notice" i]',
-  '[id*="notice" i]',
-  '[class*="alert" i]',
-  '[id*="alert" i]',
-  '[class*="disclaimer" i]',
-  '[id*="disclaimer" i]',
-  '[class*="banner" i]',
-  '[id*="banner" i]',
-  '[class*="sticky-footer" i]',
-  '[id*="sticky-footer" i]',
-  '[class*="bottom-bar" i]',
-  '[id*="bottom-bar" i]',
-  '[class*="privacy-prompt" i]',
-  '[id*="privacy-prompt" i]',
-  '[class*="gdpr-modal" i]',
-  '[id*="gdpr-modal" i]',
-  '[class*="consent-wall" i]',
-  '[id*="consent-wall" i]',
-  '[class*="tos-popup" i]',
-  '[id*="tos-popup" i]',
-  '[class*="terms-modal" i]',
-  '[id*="terms-modal" i]',
-  '[data-testid*="cookie" i]',
-  '[data-testid*="consent" i]'
+// FIX: moved out of extractMainText() to module scope so it can be shared
+// by detectLegalPageSignals() below (previously only extractMainText()
+// could see this list, which meant hasLegalSurface() had no access to it
+// and fell back to a much weaker check - see detectLegalPageSignals()).
+const DEDICATED_LEGAL_URL_KEYWORDS = [
+  'privacy', 'terms', 'conditions', 'cookie-policy', 'cookie_policy',
+  'legal', 'gdpr', 'tos', 'obshti-usloviya', 'polzovatelsko-soglashenie',
+  'usloviya-polzovaniya', 'politika-konfidentsialnosti', 'privacy-policy',
+  'terms-of-service', 'terms-of-use', 'data-protection', 'data_policy',
+  'legal-notice', 'impressum', 'aviso-legal', 'mentions-legales',
+  'datenschutz', 'nutzungsbedingungen', 'allgemeine-geschaeftsbedingungen',
+  'cookies', 'consent', 'user-agreement', 'service-terms',
+  // FIX: added so pages like visit.varna.bg/bg/declaration-personal-data.html
+  // are recognized by URL alone, without relying only on heading text.
+  'declaration-personal-data', 'personal-data', 'declaration',
 ];
 
-/* =========================================================
-   ADVANCED MULTI-SOURCE EXTRACTION
-   ========================================================= */
+const BG_LATIN_TO_CYRILLIC_MAP = [
+  ['shch', 'щ'], ['sht', 'щ'],
+  ['yu', 'ю'], ['ya', 'я'], ['zh', 'ж'], ['ch', 'ч'], ['sh', 'ш'],
+  ['ts', 'ц'], ['ye', 'е'], ['yo', 'ьо'], ['kh', 'х'], ['dzh', 'дж'],
+  ['a', 'а'], ['b', 'б'], ['v', 'в'], ['g', 'г'], ['d', 'д'],
+  ['e', 'е'], ['z', 'з'], ['i', 'и'], ['j', 'й'], ['y', 'ъ'],
+  ['k', 'к'], ['l', 'л'], ['m', 'м'], ['n', 'н'], ['o', 'о'],
+  ['p', 'п'], ['r', 'р'], ['s', 'с'], ['t', 'т'], ['u', 'у'],
+  ['f', 'ф'], ['h', 'х'], ['c', 'ц'], ['q', 'к'], ['w', 'в'], ['x', 'кс'],
+];
 
-/* ---- Strategy 1: CMP Global Objects ---- */
-function getCmpGlobalData() {
-  let extraText = '';
+function transliterateLatinToCyrillicBG(text) {
+  if (!text) {
+    return '';
+  }
 
-  // Cookiebot
-  if (window.Cookiebot && window.Cookiebot.decl) {
+  const lower = text.toLowerCase();
+  let result = '';
+  let i = 0;
+
+  outer: while (i < lower.length) {
+    for (const [latin, cyrillic] of BG_LATIN_TO_CYRILLIC_MAP) {
+      if (lower.startsWith(latin, i)) {
+        result += cyrillic;
+        i += latin.length;
+        continue outer;
+      }
+    }
+    result += lower[i];
+    i += 1;
+  }
+
+  return result;
+}
+
+const CMP_OVERLAY_SELECTORS = [
+  '[id*="onetrust" i]', '[class*="onetrust" i]',
+  '[id*="didomi" i]', '[class*="didomi" i]',
+  '[id*="cookielaw" i]', '[class*="cookielaw" i]',
+  '[id*="cmp" i]', '[class*="cmp" i]',
+  '[id*="trustarc" i]', '[class*="trustarc" i]',
+  '[id*="evidon" i]', '[class*="evidon" i]',
+  '[id*="quantcast" i]', '[class*="quantcast" i]',
+  '[id*="cybot" i]', '[class*="cybot" i]',
+  '[id*="usercentrics" i]', '[class*="usercentrics" i]',
+  '[id*="sp_message" i]', '[class*="sp_message" i]',
+  '[id*="iubenda" i]', '[class*="iubenda" i]',
+  '[id*="termly" i]', '[class*="termly" i]',
+  '[id*="cookie-script" i]', '[class*="cookie-script" i]',
+  '[id*="axeptio" i]', '[class*="axeptio" i]',
+  '[id*="fg-modal" i]', '[class*="fg-modal" i]',
+  '[id*="cookie-banner" i]', '[class*="cookie-banner" i]',
+  '[id*="consent-banner" i]', '[class*="consent-banner" i]',
+  '[id*="cookie-wall" i]', '[class*="cookie-wall" i]',
+  '[id*="modal-overlay" i]', '[class*="modal-overlay" i]',
+  '[id*="lightbox" i]', '[class*="lightbox" i]',
+  '[id*="backdrop" i]', '[class*="backdrop" i]',
+  '[id*="flyout" i]', '[class*="flyout" i]',
+  '[id*="drawer" i]', '[class*="drawer" i]',
+  '[id*="interstitial" i]', '[class*="interstitial" i]',
+  '[id*="takeover" i]', '[class*="takeover" i]',
+  '[id*="sheet" i]', '[class*="sheet" i]',
+  '[class*="overlay" i]', '[class*="modal" i]', '[class*="dialog" i]',
+  '[class*="popup" i]', '[id*="modal" i]', '[id*="dialog" i]', '[id*="popup" i]',
+  '[class*="notice" i]', '[id*="notice" i]',
+  '[class*="alert" i]', '[id*="alert" i]',
+  '[class*="disclaimer" i]', '[id*="disclaimer" i]',
+  '[class*="banner" i]', '[id*="banner" i]',
+  '[class*="sticky-footer" i]', '[id*="sticky-footer" i]',
+  '[class*="bottom-bar" i]', '[id*="bottom-bar" i]',
+  '[class*="privacy-prompt" i]', '[id*="privacy-prompt" i]',
+  '[class*="gdpr-modal" i]', '[id*="gdpr-modal" i]',
+  '[class*="consent-wall" i]', '[id*="consent-wall" i]',
+  '[class*="tos-popup" i]', '[id*="tos-popup" i]',
+  '[class*="terms-modal" i]', '[id*="terms-modal" i]',
+  '[data-testid*="cookie" i]', '[data-testid*="consent" i]',
+  '#uc-main-dialog',
+  '#cookiescript_injected',
+  '.cmp.gdpr',
+];
+
+const CMP_OVERLAY_SELECTOR_STRING = CMP_OVERLAY_SELECTORS.join(', ');
+
+function isTechnicalCmpIframe() {
+  return (
+    window.self !== window.top &&
+    /consentcdn\.cookiebot\.eu/i.test(window.location.hostname)
+  );
+}
+
+function isVisible(node) {
+  if (!node) {
+    return false;
+  }
+
+  let element = node;
+
+  if (element.nodeType === Node.TEXT_NODE) {
+    element = element.parentElement;
+  }
+
+  if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+    return false;
+  }
+
+  if (!element.isConnected) {
+    return false;
+  }
+
+  if (element.hasAttribute && element.hasAttribute('hidden')) {
+    return false;
+  }
+
+  let style;
+  try {
+    style = window.getComputedStyle(element);
+  } catch (e) {
+    return true;
+  }
+
+  if (!style) {
+    return true;
+  }
+
+  if (
+    style.display === 'none' ||
+    style.visibility === 'hidden' ||
+    style.visibility === 'collapse'
+  ) {
+    return false;
+  }
+
+  if (parseFloat(style.opacity) === 0) {
+    return false;
+  }
+
+  try {
+    const rect = element.getBoundingClientRect();
+    if (
+      rect.width === 0 &&
+      rect.height === 0 &&
+      element.getClientRects().length === 0
+    ) {
+      return false;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  return true;
+}
+
+function getNodeText(node) {
+  if (!node) {
+    return '';
+  }
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    return cleanText(node.textContent);
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return '';
+  }
+
+  if (typeof node.innerText === 'string' && node.innerText.trim().length > 0) {
+    return cleanText(node.innerText);
+  }
+
+  return cleanText(node.textContent || '');
+}
+
+function getTextExcludingOverlays(root) {
+  if (!root) {
+    return '';
+  }
+
+  const pieces = [];
+
+  function walk(node) {
+    if (!node) {
+      return;
+    }
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent) {
+        pieces.push(node.textContent);
+      }
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+
+    const tag = node.tagName ? node.tagName.toLowerCase() : '';
+
+    if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'svg') {
+      return;
+    }
+
     try {
-      extraText += '\n[Cookiebot Declaration]\n' + JSON.stringify(window.Cookiebot.decl, null, 2);
+      if (node.matches && node.matches(CMP_OVERLAY_SELECTOR_STRING)) {
+        return;
+      }
     } catch (e) {
-      console.debug('NexusKitty: Cookiebot decl parse failed', e);
+      // ignore malformed selector match
+    }
+
+    for (const child of node.childNodes) {
+      walk(child);
     }
   }
 
-  // OneTrust
+  walk(root);
+
+  return cleanText(pieces.join(' '));
+}
+
+function getCmpGlobalData() {
+  let extraText = '';
+
+  if (window.Cookiebot && window.Cookiebot.decl) {
+    try {
+      extraText += '\n[Cookiebot Declaration]\n' + JSON.stringify(window.Cookiebot.decl, null, 2);
+    } catch (e) {}
+  }
+
   if (window.OnetrustActiveGroups || window.OneTrust) {
     try {
       const otData = window.OneTrust || window.OnetrustActiveGroups;
       extraText += '\n[OneTrust Data]\n' + JSON.stringify(otData, null, 2);
-    } catch (e) {
-      console.debug('NexusKitty: OneTrust parse failed', e);
-    }
+    } catch (e) {}
   }
 
-  // Usercentrics
   if (window.Usercentrics) {
     try {
       extraText += '\n[Usercentrics Data]\n' + JSON.stringify(window.Usercentrics, null, 2);
-    } catch (e) {
-      console.debug('NexusKitty: Usercentrics parse failed', e);
-    }
+    } catch (e) {}
   }
 
-  // Didomi
   if (window.Didomi) {
     try {
       extraText += '\n[Didomi Data]\n' + JSON.stringify(window.Didomi, null, 2);
-    } catch (e) {
-      console.debug('NexusKitty: Didomi parse failed', e);
-    }
+    } catch (e) {}
   }
 
-  // CMP generic
   if (window.CMP || window.cmpManager) {
     try {
       extraText += '\n[Generic CMP Data]\n' + JSON.stringify(window.CMP || window.cmpManager, null, 2);
-    } catch (e) {
-      console.debug('NexusKitty: Generic CMP parse failed', e);
-    }
+    } catch (e) {}
   }
 
-  // Google FCS (Funding Choices)
   if (window.googlefc) {
     try {
       extraText += '\n[Google Funding Choices]\n' + JSON.stringify(window.googlefc, null, 2);
-    } catch (e) {
-      console.debug('NexusKitty: Google FCS parse failed', e);
-    }
+    } catch (e) {}
   }
 
   return extraText.slice(0, 5000);
 }
 
-/* ---- Strategy 2: Deep Shadow DOM & Iframe Traversal ---- */
 function getDeepText(node, visited = new WeakSet()) {
   if (!node) return '';
-  if (visited.has(node)) return ''; // Prevent cycles
+  if (visited.has(node)) return '';
   visited.add(node);
 
   let text = '';
 
-  // Text nodes
   if (node.nodeType === Node.TEXT_NODE) {
     return cleanText(node.textContent);
   }
 
-  // Element nodes
   if (node.nodeType === Node.ELEMENT_NODE) {
-    // Skip script/style/noscript
     const tag = node.tagName.toLowerCase();
     if (['script', 'style', 'noscript'].includes(tag)) {
       return '';
     }
 
-    // Traverse Shadow Root if present
+    try {
+      if (node.matches && node.matches(CMP_OVERLAY_SELECTOR_STRING)) {
+        return '';
+      }
+    } catch (e) {
+      // ignore malformed selector match
+    }
+
     if (node.shadowRoot) {
       text += ' ' + getDeepText(node.shadowRoot, visited);
     }
 
-    // Traverse standard child nodes
     for (const child of node.childNodes) {
       text += ' ' + getDeepText(child, visited);
     }
 
-    // Traverse accessible same-origin iframes
     if (tag === 'iframe') {
       try {
         if (node.contentDocument && node.contentDocument.body) {
           text += ' ' + getDeepText(node.contentDocument.body, visited);
         }
       } catch (e) {
-        // Cross-origin iframe, silently ignore
+        // cross-origin, ignore
       }
     }
   }
@@ -258,23 +375,15 @@ function getDeepText(node, visited = new WeakSet()) {
   return text;
 }
 
-/* ---- Strategy 3: Enhanced Main Document Text (Combines All Sources) ---- */
 function getMainDocumentText() {
   const selectors = [
-    'main',
-    'article',
-    '[role="main"]',
-    '.terms',
-    '.privacy-policy',
-    '.terms-of-service',
-    '.cookie-policy',
-    '#content',
-    '.content'
+    'main', 'article', '[role="main"]',
+    '.terms', '.privacy-policy', '.terms-of-service', '.cookie-policy',
+    '#content', '.content'
   ];
 
   let bestText = '';
 
-  // 1. Standard visible DOM extraction (existing logic)
   for (const selector of selectors) {
     const node = document.querySelector(selector);
 
@@ -289,13 +398,11 @@ function getMainDocumentText() {
     }
   }
 
-  // 2. Deep Shadow DOM + Iframe text from body (captures CMP iframes)
   const deepBodyText = getDeepText(document.body);
   if (deepBodyText.length > bestText.length) {
     bestText = deepBodyText;
   }
 
-  // 3. CMP Global Objects (JavaScript state)
   const cmpGlobalText = getCmpGlobalData();
   if (cmpGlobalText) {
     if (bestText) {
@@ -305,7 +412,6 @@ function getMainDocumentText() {
     }
   }
 
-  // 4. Fallback: body text excluding overlays
   if (!bestText || bestText.length < 400) {
     const bodyText = getTextExcludingOverlays(document.body);
     if (bodyText.length > bestText.length) {
@@ -316,61 +422,34 @@ function getMainDocumentText() {
   return bestText.slice(0, MAX_TEXT_LENGTH);
 }
 
-/* =========================================================
-   CONSENT CONTAINER DETECTION
-   ========================================================= */
-
 const CONSENT_SELECTORS = [
-  '[role="dialog"]',
-  '[role="alertdialog"]',
-  '[aria-modal="true"]',
-  'dialog[open]',
-  '[id*="cookie" i]',
-  '[class*="cookie" i]',
-  '[id*="consent" i]',
-  '[class*="consent" i]',
-  '[id*="fg-modal" i]',
-  '[class*="fg-modal" i]',
-  '[id*="trustarc" i]',
-  '[class*="trustarc" i]',
-  '[id*="evidon" i]',
-  '[class*="evidon" i]',
-  '[id*="quantcast" i]',
-  '[class*="quantcast" i]',
-  '[id*="cybot" i]',
-  '[class*="cybot" i]',
-  '[id*="usercentrics" i]',
-  '[class*="usercentrics" i]',
-  '[id*="sp_message" i]',
-  '[class*="sp_message" i]',
-  '[id*="iubenda" i]',
-  '[class*="iubenda" i]',
-  '[id*="termly" i]',
-  '[class*="termly" i]',
-  '[id*="cookie-script" i]',
-  '[class*="cookie-script" i]',
-  '[id*="axeptio" i]',
-  '[class*="axeptio" i]',
-  '[id*="privacy" i]',
-  '[class*="privacy" i]',
-  '[id*="terms" i]',
-  '[class*="terms" i]',
-  '[id*="policy" i]',
-  '[class*="policy" i]',
-  '[id*="privacy-prompt" i]',
-  '[class*="privacy-prompt" i]',
-  '[id*="gdpr-modal" i]',
-  '[class*="gdpr-modal" i]',
-  '[id*="consent-wall" i]',
-  '[class*="consent-wall" i]',
-  '[id*="modal" i]',
-  '[class*="modal" i]',
-  '[id*="dialog" i]',
-  '[class*="dialog" i]',
-  '[id*="popup" i]',
-  '[class*="popup" i]',
-  '[id*="banner" i]',
-  '[class*="banner" i]'
+  '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', 'dialog[open]',
+  '[id*="cookie" i]', '[class*="cookie" i]',
+  '[id*="consent" i]', '[class*="consent" i]',
+  '[id*="fg-modal" i]', '[class*="fg-modal" i]',
+  '[id*="trustarc" i]', '[class*="trustarc" i]',
+  '[id*="evidon" i]', '[class*="evidon" i]',
+  '[id*="quantcast" i]', '[class*="quantcast" i]',
+  '[id*="cybot" i]', '[class*="cybot" i]',
+  '[id*="usercentrics" i]', '[class*="usercentrics" i]',
+  '[id*="sp_message" i]', '[class*="sp_message" i]',
+  '[id*="iubenda" i]', '[class*="iubenda" i]',
+  '[id*="termly" i]', '[class*="termly" i]',
+  '[id*="cookie-script" i]', '[class*="cookie-script" i]',
+  '[id*="axeptio" i]', '[class*="axeptio" i]',
+  '[id*="privacy" i]', '[class*="privacy" i]',
+  '[id*="terms" i]', '[class*="terms" i]',
+  '[id*="policy" i]', '[class*="policy" i]',
+  '[id*="privacy-prompt" i]', '[class*="privacy-prompt" i]',
+  '[id*="gdpr-modal" i]', '[class*="gdpr-modal" i]',
+  '[id*="consent-wall" i]', '[class*="consent-wall" i]',
+  '[id*="modal" i]', '[class*="modal" i]',
+  '[id*="dialog" i]', '[class*="dialog" i]',
+  '[id*="popup" i]', '[class*="popup" i]',
+  '[id*="banner" i]', '[class*="banner" i]',
+  '#uc-main-dialog',
+  '#cookiescript_injected',
+  '.cmp.gdpr',
 ];
 
 function getActionNodes(node) {
@@ -385,20 +464,81 @@ function getActionNodes(node) {
   );
 }
 
+// FIX: NEW. "banner", "notice", "alert" and "disclaimer" are extremely
+// overloaded words in web markup - a site's HEADER/HERO region very
+// commonly carries role="banner" (the standard ARIA landmark for a page's
+// masthead, e.g. Drupal themes default their header region to exactly
+// this) or a class/id literally containing "banner"/"page-banner", with
+// nothing to do with cookies. CMP_OVERLAY_SELECTORS/CONSENT_SELECTORS
+// intentionally include bare `[class*="banner" i]` etc. as a catch-all
+// for sites that DO name their cookie banner that way, but that same
+// catch-all was matching deutschland.de's own site header/nav ("Skip to
+// main content Open meta menu ... In focus: Working Studying ...")
+// instead of the real Usercentrics dialog. Semantic landmarks (header,
+// nav, footer, main, and their ARIA role equivalents) are never
+// themselves a consent dialog - only a descendant of one could be, and
+// that descendant will already be matched independently by its own
+// selector/role. So the landmark itself is always safe to exclude.
+function isSemanticNonConsentLandmark(node) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+    return false;
+  }
+
+  const role = (node.getAttribute('role') || '').toLowerCase();
+  if (['banner', 'navigation', 'main', 'contentinfo'].includes(role)) {
+    return true;
+  }
+
+  const tag = node.tagName ? node.tagName.toLowerCase() : '';
+  return ['header', 'nav', 'footer', 'main'].includes(tag);
+}
+
+// FIX: NEW. Replaces a single-keyword-anywhere regex test with a
+// density check requiring at least two DISTINCT consent-specific
+// keyword hits. A long navigation/header text block can easily contain
+// one incidental match (e.g. a "Manage account" link, or "policy" inside
+// an unrelated category name) against the old single-match regex; a
+// genuine cookie/consent dialog reliably contains several of these
+// phrases together (cookie + consent/privacy/manage/accept-all, etc.).
+function hasStrongConsentSignal(text) {
+  if (!text) return false;
+  const markerPattern = /(cookie|consent|gdpr|privacy policy|personal data|third[- ]party|advertising partner|similar technolog|tracking|manage cookies|cookie settings|accept all|reject all|allow all|essential cookies)/gi;
+  const hits = text.match(markerPattern) || [];
+  return hits.length >= 2;
+}
+
 function isConsentContainer(node) {
   if (!isVisible(node)) {
     return false;
   }
 
+  // FIX: NEW - reject the page's own header/nav/footer/main landmarks
+  // before any of the checks below get a chance to false-positive on
+  // them (see isSemanticNonConsentLandmark() above).
+  if (isSemanticNonConsentLandmark(node)) {
+    return false;
+  }
+
+  // Strong CMP-specific identifiers: these are the parent dialog
+  // containers for known consent platforms. Matching them here
+  // prevents nested child elements (e.g. #cookiescript_header)
+  // from being treated as separate consent containers.
+  const nodeId = (node.id || '').toLowerCase();
+  const nodeClass = typeof node.className === 'string'
+    ? node.className.toLowerCase()
+    : '';
+
+  if (
+    nodeId === 'uc-main-dialog' ||
+    nodeId === 'cookiescript_injected' ||
+    nodeClass.includes('cmp gdpr') ||
+    nodeClass.split(/\s+/).includes('cmp') && nodeClass.split(/\s+/).includes('gdpr')
+  ) {
+    return true;
+  }
+
   const text = getNodeText(node);
 
-  // FIX: The original upper bound of 4000 chars silently rejected large,
-  // detailed GDPR/CMP notices (e.g. Sourcepoint-style banners that list
-  // 100+ third parties, legal-basis text, article references, etc.).
-  // Those legitimately exceed 4000 characters. We still reject only the
-  // "too short to be meaningful" case; the final extracted text is
-  // truncated later anyway via BANNER_BUDGET / MAX_TEXT_LENGTH, so no
-  // need for an artificial ceiling here.
   if (text.length < 30) {
     return false;
   }
@@ -436,10 +576,6 @@ function isConsentContainer(node) {
   );
 }
 
-/*
- * Only inspect elements likely to be consent/legal containers
- * instead of scanning every node in the body.
- */
 function getConsentContainers() {
   const nodes = new Set();
 
@@ -449,8 +585,28 @@ function getConsentContainers() {
     });
   }
 
-  return Array.from(nodes)
-    .filter((node) => isConsentContainer(node))
+  const candidates = Array.from(nodes)
+    .filter((node) => isConsentContainer(node));
+
+  // Remove descendants of stronger containers so nested CMP
+  // elements (e.g. #cookiescript_header inside #cookiescript_injected)
+  // are not treated as separate consent containers.
+  const result = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    let isDescendant = false;
+    for (let j = 0; j < candidates.length; j += 1) {
+      if (i === j) continue;
+      if (candidates[j].contains(candidates[i])) {
+        isDescendant = true;
+        break;
+      }
+    }
+    if (!isDescendant) {
+      result.push(candidates[i]);
+    }
+  }
+
+  return result
     .map((node) => ({
       node,
       text: getNodeText(node)
@@ -458,9 +614,6 @@ function getConsentContainers() {
     .sort((left, right) => left.text.length - right.text.length);
 }
 
-/*
- * Used only by MutationObserver: inspect only the newly inserted subtree.
- */
 function findConsentContainersInNode(rootNode) {
   if (!rootNode || rootNode.nodeType !== Node.ELEMENT_NODE) {
     return [];
@@ -477,30 +630,173 @@ function findConsentContainersInNode(rootNode) {
     results.add(node);
   });
 
-  return Array.from(results).filter((node) => isConsentContainer(node));
+  const candidates = Array.from(results).filter((node) => isConsentContainer(node));
+
+  // Remove descendants of stronger containers so nested CMP
+  // elements are not treated as separate consent containers.
+  const filtered = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    let isDescendant = false;
+    for (let j = 0; j < candidates.length; j += 1) {
+      if (i === j) continue;
+      if (candidates[j].contains(candidates[i])) {
+        isDescendant = true;
+        break;
+      }
+    }
+    if (!isDescendant) {
+      filtered.push(candidates[i]);
+    }
+  }
+
+  return filtered;
 }
 
-/* =========================================================
-   LEGAL PAGE DETECTION
-   ========================================================= */
+// FIX: extracted from what used to be inline, duplicated logic at the top
+// of extractMainText(). Previously hasLegalSurface() (called by popup.js
+// via the legal_surface field) did NOT use this logic at all - it only
+// checked LEGAL_URL_REGEX against the raw URL and whether a consent
+// popup was currently open. That meant a dedicated legal page like
+// visit.varna.bg/bg/declaration-personal-data.html - whose URL doesn't
+// contain any LEGAL_URL_KEYWORDS word and which has no active cookie
+// banner - was reported as legal_surface: false even though
+// extractMainText() itself would have classified it correctly via its
+// own (until now, private) isLegalPage check. Both call sites now share
+// this single function so they can never disagree again.
+function detectLegalPageSignals() {
+  const headingText = Array.from(document.querySelectorAll('h1, h2'))
+    .slice(0, 5)
+    .map((heading) => getNodeText(heading))
+    .join(' ');
+
+  const urlKeywordMatch = DEDICATED_LEGAL_URL_KEYWORDS.some((kw) =>
+    window.location.href.toLowerCase().includes(kw)
+  );
+
+  const transliteratedUrl = transliterateLatinToCyrillicBG(window.location.href);
+  const urlTransliteratedMatch = LEGAL_URL_REGEX.test(transliteratedUrl);
+
+  const headingKeywordMatch = LEGAL_PAGE_REGEX.test(
+    `${document.title} ${headingText}`
+  );
+
+  return {
+    isLegalPage: urlKeywordMatch || urlTransliteratedMatch || headingKeywordMatch,
+    urlKeywordMatch,
+    urlTransliteratedMatch,
+    transliteratedUrl,
+    headingKeywordMatch,
+    headingText,
+  };
+}
 
 function hasLegalSurface() {
+  // FIX: previously only checked the raw URL against LEGAL_URL_REGEX and
+  // whether a consent popup happened to be open at this exact moment.
+  // Now reuses the same heading/URL/transliteration signal that
+  // extractMainText() already computes, so a dedicated legal page is
+  // recognized even with no active cookie banner and a URL that doesn't
+  // contain an English legal keyword.
+  if (detectLegalPageSignals().isLegalPage) {
+    return true;
+  }
+
   if (LEGAL_URL_REGEX.test(window.location.href)) {
     return true;
   }
 
-  // Avoid a full body scan; structural consent detection is enough here.
   return getConsentContainers().length > 0;
 }
 
-/* =========================================================
-   LEGAL LINKS
-   ========================================================= */
+function normalizeLegalUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    let path = parsed.pathname;
+    if (path.length > 1 && path.endsWith('/')) {
+      path = path.slice(0, -1);
+    }
+    parsed.pathname = path;
+    return parsed.origin + parsed.pathname + parsed.search;
+  } catch {
+    return url.split('#')[0].replace(/\/$/, '');
+  }
+}
+
+// FIX: NEW. Reads the domain-level legal URL cache written by
+// discoverDomainLegalLinks() below.
+async function readDomainLegalCache(origin) {
+  try {
+    const key = DOMAIN_LEGAL_CACHE_PREFIX + origin;
+    const result = await chrome.storage.local.get(key);
+    const cached = result[key];
+
+    if (
+      cached &&
+      typeof cached.timestamp === 'number' &&
+      Date.now() - cached.timestamp < DOMAIN_LEGAL_CACHE_TTL &&
+      Array.isArray(cached.urls)
+    ) {
+      return cached.urls;
+    }
+  } catch (error) {
+    // ignore, treat as cache miss
+  }
+
+  return null;
+}
+
+async function writeDomainLegalCache(origin, urls) {
+  try {
+    const key = DOMAIN_LEGAL_CACHE_PREFIX + origin;
+    await chrome.storage.local.set({
+      [key]: { timestamp: Date.now(), urls },
+    });
+  } catch (error) {
+    // ignore, non-fatal
+  }
+}
+
+// FIX: NEW. Domain-scoped fallback for when the CURRENT page's own DOM
+// has no anchor matching LEGAL_URL_REGEX (findLegalLinks() returned
+// empty). Instead of giving up, this asks background.js to look at the
+// site's robots.txt/sitemap.xml and, failing that, probe a short list of
+// well-known legal-page URL slugs (see DOMAIN-LEVEL LEGAL PAGE DISCOVERY
+// in background.js). Cached per-origin so this network round-trip only
+// happens once per site per DOMAIN_LEGAL_CACHE_TTL, not on every page.
+async function discoverDomainLegalLinks() {
+  const origin = window.location.origin;
+
+  const cached = await readDomainLegalCache(origin);
+  if (cached !== null) {
+    console.log('NexusKitty [DIAG]: domain legal cache hit for', origin, '->', cached);
+    return cached;
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'NEXUSKITTY_DISCOVER_LEGAL_URLS',
+      origin,
+    });
+
+    const urls = response?.ok && Array.isArray(response.urls) ? response.urls : [];
+
+    console.log('NexusKitty [DIAG]: domain legal discovery for', origin, '->', urls);
+
+    // Cache even an empty result so we don't re-probe a site that
+    // genuinely has no discoverable legal pages on every single page
+    // load - it will simply be re-tried after the TTL expires.
+    await writeDomainLegalCache(origin, urls);
+
+    return urls;
+  } catch (error) {
+    console.debug('NexusKitty: domain legal discovery failed.', error?.message || error);
+    return [];
+  }
+}
 
 function findLegalLinks() {
   const links = Array.from(document.querySelectorAll('a[href]'));
-  const legalRegex =
-    /(terms|condition|privacy|cookie|legal|policy|gdpr|data-protection)/i;
 
   const uniqueLinks = [];
   const seen = new Set();
@@ -513,13 +809,17 @@ function findLegalLinks() {
       !href ||
       href.startsWith('javascript:') ||
       href.startsWith('#') ||
-      !legalRegex.test(`${href} ${text}`) ||
-      seen.has(href)
+      !LEGAL_URL_REGEX.test(`${href} ${text}`)
     ) {
       continue;
     }
 
-    seen.add(href);
+    const normalized = normalizeLegalUrl(href);
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
 
     uniqueLinks.push({
       href,
@@ -534,10 +834,6 @@ function findLegalLinks() {
   return uniqueLinks;
 }
 
-/* =========================================================
-   LEGAL PAGE FETCH
-   ========================================================= */
-
 async function fetchLegalPageText(url) {
   try {
     const response = await chrome.runtime.sendMessage({
@@ -546,7 +842,6 @@ async function fetchLegalPageText(url) {
     });
 
     if (!response?.ok || !response.html) {
-      console.debug('NexusKitty: background fetch returned no html for', url, response);
       return '';
     }
 
@@ -567,32 +862,9 @@ async function fetchLegalPageText(url) {
 
     return cleanText(mainNode.textContent || mainNode.innerText || '');
   } catch (err) {
-    console.debug('NexusKitty: Could not fetch legal page:', url, err);
     return '';
   }
 }
-
-/* =========================================================
-   CROSS-ORIGIN CONSENT IFRAME RECOVERY
-   ---------------------------------------------------------
-   Many CMPs (Sourcepoint and similar vendors) render the actual
-   consent/cookie banner inside a cross-origin <iframe>. The Same-Origin
-   Policy blocks contentDocument access to it entirely - it is invisible
-   to getDeepText()/getActiveConsentPopup() even though it's clearly on
-   screen. The iframe's `src` attribute string is always readable though,
-   so fetch that URL's HTML through the background relay instead.
-
-   NOTE: This raw-fetch approach only recovers server-rendered HTML. Many
-   modern CMPs (including Sourcepoint's "Notice Message App") render an
-   almost-empty HTML shell and build the actual banner text client-side
-   via JS after load. For those, this fetch will come back empty/short,
-   and the ONLY reliable source of the banner text is the content-script
-   instance running inside the iframe itself (see
-   "CROSS-ORIGIN IFRAME CONSENT DETECTION" section near the bottom of this
-   file), which sees the fully hydrated DOM and relays it up via
-   chrome.runtime messaging. That's why extractMainText() below checks
-   receivedIframeConsentText FIRST, before falling back to this fetch.
-   ========================================================= */
 
 const CMP_IFRAME_HOST_PATTERN =
   /(onetrust|cookielaw|didomi|trustarc|evidon|quantcast|cybot|cookiebot|usercentrics|sourcepoint|sp[-_.]?prod|privacy-mgmt|consentmanager|iubenda|termly|axeptio|cmp\.|cookie-script|consensu)/i;
@@ -614,8 +886,6 @@ function getConsentIframeCandidates() {
         return true;
       }
 
-      // Fallback heuristic: a sizeable, overlay-positioned iframe is
-      // likely a consent/paywall dialog even if its host isn't recognized.
       const style = window.getComputedStyle(iframe);
       const rect = iframe.getBoundingClientRect();
       const isOverlayLayer = ['fixed', 'sticky', 'absolute'].includes(style.position);
@@ -636,7 +906,6 @@ async function fetchIframeConsentText(url) {
     });
 
     if (!response?.ok || !response.html) {
-      console.debug('NexusKitty: background fetch returned no html for consent iframe', url, response);
       return '';
     }
 
@@ -647,81 +916,37 @@ async function fetchIframeConsentText(url) {
 
     return cleanText(doc.body ? (doc.body.textContent || doc.body.innerText || '') : '');
   } catch (err) {
-    console.debug('NexusKitty: Could not fetch consent iframe:', url, err);
     return '';
   }
 }
 
-/* =========================================================
-    MAIN TEXT EXTRACTION
-    ========================================================= */
-
-/*
-  * Detect an active consent / CMP overlay or modal that is currently
-  * visible on the page. Returns { node, text } or null.
-  * The consent popup IS the primary document the user wants to analyze.
-  */
-/* =========================================================
-   CMP DETAIL EXTRACTION
-   ========================================================= */
-
 const CMP_DETAIL_SELECTORS = [
-  // Cookiebot
-  '#CookiebotWidget',
-  '#CybotCookiebotDialog',
-  '.cc-btn',
-  '.cc-link',
-  '[id*="cookiebot"]',
-  '[class*="cookiebot"]',
-  // OneTrust
-  '#onetrust-policy',
-  '#onetrust-consent-sdk',
-  '.ot-pc-footer',
-  '.ot-pc-header',
-  '[id*="onetrust"]',
-  '[class*="onetrust"]',
-  // Didomi
-  '#didomi-popup',
-  '[id*="didomi"]',
-  '[class*="didomi"]',
-  // Usercentrics
-  '[data-testid*="uc-"]',
-  '[class*="usercentrics"]',
-  // iubenda
-  '[class*="iubenda"]',
-  '[id*="iubenda"]',
-  // Termly
-  '[class*="termly"]',
-  '[id*="termly"]',
-  // Generic detail/accordion patterns
-  '[id*="details"]',
-  '[class*="details"]',
-  '[id*="accordion"]',
-  '[class*="accordion"]',
-  '[id*="vendor"]',
-  '[class*="vendor"]',
-  '[id*="purpose"]',
-  '[class*="purpose"]',
-  '[id*="category"]',
-  '[class*="category"]',
-  '[id*="cookie-table"]',
-  '[class*="cookie-table"]',
-  '[id*="cookie-list"]',
-  '[class*="cookie-list"]',
-  '[id*="partner"]',
-  '[class*="partner"]',
-  '[id*="third-party"]',
-  '[class*="third-party"]',
-  '.cookie-consent-details',
-  '.consent-details',
-  '.vendor-list',
-  '.purpose-list',
+  '#CookiebotWidget', '#CybotCookiebotDialog', '.cc-btn', '.cc-link',
+  '[id*="cookiebot"]', '[class*="cookiebot"]',
+  '#onetrust-policy', '#onetrust-consent-sdk', '.ot-pc-footer', '.ot-pc-header',
+  '[id*="onetrust"]', '[class*="onetrust"]',
+  '#didomi-popup', '[id*="didomi"]', '[class*="didomi"]',
+  '[data-testid*="uc-"]', '[class*="usercentrics"]',
+  '[class*="iubenda"]', '[id*="iubenda"]',
+  '[class*="termly"]', '[id*="termly"]',
+  '[id*="details"]', '[class*="details"]',
+  '[id*="accordion"]', '[class*="accordion"]',
+  '[id*="vendor"]', '[class*="vendor"]',
+  '[id*="purpose"]', '[class*="purpose"]',
+  '[id*="category"]', '[class*="category"]',
+  '[id*="cookie-table"]', '[class*="cookie-table"]',
+  '[id*="cookie-list"]', '[class*="cookie-list"]',
+  '[id*="partner"]', '[class*="partner"]',
+  '[id*="third-party"]', '[class*="third-party"]',
+  '.cookie-consent-details', '.consent-details', '.vendor-list', '.purpose-list',
   '.cookie-policy-details',
-  '[role="tabpanel"]',
-  '[aria-hidden="true"]',
-  'details > summary',
-  'details[open]',
-  '[data-tab]', '[data-panel]'
+  '[role="tabpanel"]', '[aria-hidden="true"]',
+  'details > summary', 'details[open]',
+  '[data-tab]', '[data-panel]',
+  '#uc-privacy-title', '#uc-privacy-description', '.privacy-title', '.privacy-text',
+  '#cookiescript_header', '#cookiescript_description', '#cookiescript_buttons',
+  '#cookiescript_checkboxs', '#cookiescript_readmore',
+  '.uc-cmp-btn', '.uc-btn', '.cs-btn', '.cookie-script-btn',
 ];
 
 function extractCMPDetails(cmpElement) {
@@ -729,23 +954,19 @@ function extractCMPDetails(cmpElement) {
 
   let combinedText = getNodeText(cmpElement);
 
-  // Find and extract text from detail/accordion sections
   const detailElements = cmpElement.querySelectorAll(CMP_DETAIL_SELECTORS.join(', '));
 
   for (const detailEl of detailElements) {
-    // Skip if it's the main container itself
     if (detailEl === cmpElement) continue;
 
     const detailText = getNodeText(detailEl);
     if (detailText && detailText.length > 20) {
-      // Avoid duplicates
       if (!combinedText.includes(detailText.slice(0, 50))) {
         combinedText += '\n\n[CMP Detail Section]\n' + detailText;
       }
     }
   }
 
-  // Also check for hidden tab panels / accordion content that might be collapsed
   const hiddenPanels = cmpElement.querySelectorAll(
     '[role="tabpanel"], [aria-hidden="true"], details:not([open]), .hidden, [style*="display: none"], [style*="visibility: hidden"]'
   );
@@ -775,19 +996,28 @@ function getActiveConsentPopup() {
       continue;
     }
 
-    // Extract full CMP text including detail sections
+    // FIX: NEW - this loop previously had NO landmark exclusion and
+    // accepted a single incidental keyword match anywhere in the
+    // element's text. That's how deutschland.de's own <header>/nav
+    // ("Skip to main content Open meta menu ... In focus: Working
+    // Studying ...") got matched via the bare `[class*="banner" i]` /
+    // `[id*="banner" i]` entries in CMP_OVERLAY_SELECTORS and returned
+    // as if it were the real Usercentrics consent dialog - see
+    // isSemanticNonConsentLandmark() and hasStrongConsentSignal() above.
+    if (isSemanticNonConsentLandmark(el)) {
+      continue;
+    }
+
     const fullCmpText = extractCMPDetails(el);
 
-    // Must contain consent-related keywords to qualify as a consent popup
     if (
       fullCmpText.length >= 30 &&
-      /(cookie|consent|privacy|policy|gdpr|personal data|accept|agree|close|reject|manage)/i.test(fullCmpText)
+      hasStrongConsentSignal(fullCmpText)
     ) {
       return { node: el, text: fullCmpText };
     }
   }
 
-  // Fall back to structural consent containers
   const containers = getConsentContainers();
   if (containers.length > 0) {
     const fullText = extractCMPDetails(containers[0].node);
@@ -801,110 +1031,132 @@ function getActiveConsentPopup() {
 }
 
 async function extractMainText() {
-  /*
-   * PRIORITY 0: Dedicated legal page URL takes absolute precedence.
-   * If user is on a Privacy Policy / Terms / Legal page, we want the FULL document,
-   * not just the cookie banner at the top.
-   */
-  const DEDICATED_LEGAL_URL_KEYWORDS = [
-    'privacy', 'terms', 'conditions', 'cookie-policy', 'cookie_policy',
-    'legal', 'gdpr', 'tos', 'obshti-usloviya', 'polzovatelsko-soglashenie',
-    'usloviya-polzovaniya', 'politika-konfidentsialnosti', 'privacy-policy',
-    'terms-of-service', 'terms-of-use', 'data-protection', 'data_policy',
-    'legal-notice', 'impressum', 'aviso-legal', 'mentions-legales',
-    'datenschutz', 'nutzungsbedingungen', 'allgemeine-geschaeftsbedingungen',
-    'cookies', 'consent', 'user-agreement', 'service-terms'
-  ];
+  console.log('NexusKitty [DIAG]: extractMainText() started for', window.location.href);
 
-  function isDedicatedLegalPage() {
-    const url = window.location.href.toLowerCase();
-    return DEDICATED_LEGAL_URL_KEYWORDS.some(kw => url.includes(kw));
+  if (isTechnicalCmpIframe()) {
+    console.log('[NEXUSKITTY] Skipping technical CMP iframe:', window.location.href);
+    return '';
   }
 
-  if (isDedicatedLegalPage()) {
-    console.log('NexusKitty: Dedicated legal page URL detected. Extracting full page content.');
+  // FIX: now delegates to the shared detectLegalPageSignals() instead of
+  // recomputing urlKeywordMatch/urlTransliteratedMatch/headingKeywordMatch
+  // locally. hasLegalSurface() above uses the exact same function, so the
+  // two can never disagree again.
+  const signals = detectLegalPageSignals();
+  const {
+    isLegalPage,
+    urlKeywordMatch,
+    urlTransliteratedMatch,
+    transliteratedUrl,
+    headingKeywordMatch,
+    headingText,
+  } = signals;
 
-    // Get the main document text (excluding CMP overlays)
+  console.log(
+    'NexusKitty [DIAG]: isLegalPage =', isLegalPage,
+    '(urlKeywordMatch =', urlKeywordMatch,
+    ', urlTransliteratedMatch =', urlTransliteratedMatch, '[', transliteratedUrl, ']',
+    ', headingKeywordMatch =', headingKeywordMatch, ')',
+    'headingText =', JSON.stringify(headingText.slice(0, 200)),
+    'title =', document.title
+  );
+
+  let legalLinks = findLegalLinks();
+
+  console.log(
+    'NexusKitty [DIAG]: STEP_1 findLegalLinks() found', legalLinks.length, 'link(s):',
+    legalLinks
+  );
+
+  // FIX: NEW. The current page's own DOM had no anchor pointing to a
+  // legal page (e.g. collapsed/JS-driven footer nav, or a page that
+  // simply doesn't link to Privacy/Terms at all, like a search-result
+  // page on a large multi-page site). Fall back to domain-level
+  // discovery (sitemap/robots.txt + well-known path guessing, cached
+  // per-origin) instead of proceeding straight to the noisy local/body
+  // fallbacks below.
+  if (legalLinks.length === 0) {
+    const domainUrls = await discoverDomainLegalLinks();
+
+    if (domainUrls.length) {
+      legalLinks = domainUrls.map((href) => ({ href, text: '' }));
+      console.log(
+        'NexusKitty [DIAG]: STEP_1b using', legalLinks.length,
+        'domain-discovered legal link(s) as fallback:', legalLinks
+      );
+    }
+  }
+
+  function textSignature(text) {
+  if (!text) return '';
+  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash = (hash * 31 + normalized.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+  let fetchedPagesText = '';
+
+  if (legalLinks.length > 0) {
+    const pageTexts = await Promise.all(
+      legalLinks.map(async (link) => {
+        const text = await fetchLegalPageText(link.href);
+        console.log(`NexusKitty [DIAG]: STEP_1 fetched "${link.href}" -> ${text.length} chars`);
+        return text;
+      })
+    );
+
+    const seenSignatures = new Set();
+    const deduped = [];
+
+    for (const text of pageTexts) {
+      if (text.length <= 200) continue;
+      const sig = textSignature(text);
+      if (seenSignatures.has(sig)) continue;
+      seenSignatures.add(sig);
+      deduped.push(text);
+    }
+
+    fetchedPagesText = deduped.join('\n\n--- NEXT LEGAL SECTION ---\n\n');
+  }
+
+  console.log('NexusKitty [DIAG]: STEP_1 fetchedPagesText length =', fetchedPagesText.length);
+
+  let dedicatedPageText = '';
+
+  if (isLegalPage) {
+    console.log('NexusKitty: Dedicated legal page detected. Extracting full page content.');
+
     let baseText = getMainDocumentText();
+    console.log('NexusKitty [DIAG]: STEP_2 getMainDocumentText() length =', baseText.length);
 
-    // Fallback: if structured extraction fails, use body text excluding overlays
     if (!baseText || baseText.length <= 400) {
       const bodyText = getTextExcludingOverlays(document.body);
-      if (bodyText && bodyText.length > 400) {
+      console.log('NexusKitty [DIAG]: STEP_2 fallback getTextExcludingOverlays(body) length =', bodyText.length);
+      if (bodyText && bodyText.length > baseText.length) {
         baseText = bodyText;
       }
     }
 
     if (baseText && baseText.length > 100) {
-      // Some "Terms" pages are just an index/router that points to the real
-      // documents ("please read them carefully here", linking out to
-      // UK/US/German Terms and a separate Privacy Notice). Follow those
-      // legal-looking links too, so the analysis sees the actual substantive
-      // text instead of just the router page.
-      const legalLinks = findLegalLinks();
-      console.log('NexusKitty [debug]: dedicated legal page, found links:', legalLinks);
-
-      let fetchedPagesText = '';
-
-      if (legalLinks.length > 0) {
-        const pageTexts = await Promise.all(
-          legalLinks.map(async (link) => {
-            const text = await fetchLegalPageText(link.href);
-            console.log(`NexusKitty [debug]: fetched "${link.href}" -> ${text.length} chars`);
-            return text;
-          })
-        );
-
-        fetchedPagesText = pageTexts
-          .filter((text) => text.length > 200)
-          .join('\n\n--- NEXT LEGAL SECTION ---\n\n');
-      } else {
-        console.log('NexusKitty [debug]: no legal-looking <a href> links found on this page (anchors and javascript: links are excluded).');
-      }
-
-      console.log(`NexusKitty [debug]: fetchedPagesText total length = ${fetchedPagesText.length}`);
-
-      const combined = fetchedPagesText
-        ? `${baseText}\n\n[Linked legal documents]\n${fetchedPagesText}`
-        : baseText;
-
-      return combined.slice(0, MAX_TEXT_LENGTH);
+      dedicatedPageText = baseText;
     }
-  }
 
-  /*
-   * PRIORITY 1: Active consent/CMP overlay or modal dialog.
-   * The consent popup IS the primary document the user wants to analyze.
-   */
+    console.log('NexusKitty [DIAG]: STEP_2 dedicatedPageText length =', dedicatedPageText.length);
+  }
 
   const activePopup = getActiveConsentPopup();
 
   let popupText = activePopup?.text || '';
+  console.log('NexusKitty [DIAG]: STEP_3 getActiveConsentPopup() text length =', popupText.length, 'node =', activePopup?.node);
 
-  // FIX: Prefer text already relayed up from a cross-origin CMP iframe's
-  // OWN content-script instance (see "CROSS-ORIGIN IFRAME CONSENT
-  // DETECTION" near the bottom of this file). That instance runs inside
-  // the iframe's real execution context and sees the fully JS-rendered/
-  // hydrated DOM. This is critical for CMPs like Sourcepoint's "Notice
-  // Message App", which ship an almost-empty server-rendered HTML shell
-  // and build the actual banner text client-side - a raw fetch() of the
-  // iframe URL (fetchIframeConsentText, below) will NOT see that text at
-  // all, only the empty shell.
+  console.log('NexusKitty [DIAG]: receivedIframeConsentText length =', receivedIframeConsentText.length);
   if (receivedIframeConsentText.length > popupText.length) {
     popupText = receivedIframeConsentText;
   }
 
-  // Many CMPs (Sourcepoint, some OneTrust/Usercentrics setups, etc.) render
-  // the actual consent banner inside a CROSS-ORIGIN <iframe>. The browser's
-  // Same-Origin Policy blocks contentDocument access to that iframe entirely
-  // - getDeepText()/getActiveConsentPopup() silently return nothing for it,
-  // even though the banner is clearly visible on screen. The iframe's `src`
-  // URL string itself is always readable though, so fetch that page's HTML
-  // through the background relay (extension fetches bypass CORS on read).
-  //
-  // FIX: This raw fetch is now just a fallback for CMPs that DO
-  // server-render their text into the initial HTML. It runs only if the
-  // iframe-relay text above wasn't good enough.
   if (popupText.length < 150) {
     const iframeCandidates = getConsentIframeCandidates();
 
@@ -927,231 +1179,197 @@ async function extractMainText() {
     }
   }
 
-  if (popupText) {
-    // Treat consent text as valid legal content even when short (150+ chars).
-    if (popupText.length >= 150) {
-      // If popup text is brief (< 400 chars), combine with page context
-      // so the backend has full visibility into what the user is agreeing to.
-      if (popupText.length < 400) {
-        const pageText = getMainDocumentText();
-        if (pageText && pageText.length > 100) {
-          return (
-            '[Active Consent Popup / Cookie Banner]\n' +
-            popupText + '\n\n' +
-            '[Page context]\n' +
-            pageText.slice(0, BANNER_BUDGET) + '\n\n'
-          ).slice(0, MAX_TEXT_LENGTH);
-        }
-      }
-
-      return ('[Active Consent Popup / Cookie Banner]\n' + popupText).slice(0, MAX_TEXT_LENGTH);
-    }
-  }
-
-  /*
-    * 2. Fallback to structured consent detection + main document.
-    */
-
   const structuralConsent = getConsentContainers();
-
-  const extractedBannerText = structuralConsent.length
+  const structuralBannerText = structuralConsent.length
     ? structuralConsent[0].text.slice(0, BANNER_BUDGET)
     : '';
 
-  const documentText = getMainDocumentText();
-
-  // Match URL, title and top headings only: matching the whole body text
-  // flagged any article that merely mentions "policy" or "privacy".
-  const headingText = Array.from(document.querySelectorAll('h1, h2'))
-    .slice(0, 5)
-    .map((heading) => getNodeText(heading))
-    .join(' ');
-
-  const isLegalPage = LEGAL_PAGE_REGEX.test(
-    `${window.location.href} ${document.title} ${headingText}`
+  console.log(
+    'NexusKitty [DIAG]: STEP_3 structuralConsent containers count =', structuralConsent.length,
+    'structuralBannerText length =', structuralBannerText.length
   );
 
-  if (isLegalPage && documentText.length > 400) {
-    if (extractedBannerText) {
-      return (
-        `${extractedBannerText}\n\n` +
-        `[Underlying legal document]\n` +
-        `${documentText}`
-      ).slice(0, MAX_TEXT_LENGTH);
-    }
+  const bannerText = popupText.length >= structuralBannerText.length
+    ? popupText
+    : structuralBannerText;
 
-    return documentText.slice(0, MAX_TEXT_LENGTH);
-  }
-
-  /*
-   * 2. Look for local cookie/consent/modal candidates.
-   *    body is intentionally NOT included (too expensive on large sites).
-   */
-
-  const selectors = [
-    '[role="dialog"]',
-    '[aria-modal="true"]',
-    '[id*="cookie" i]',
-    '[class*="cookie" i]',
-    '[id*="consent" i]',
-    '[class*="consent" i]',
-    '[data-testid*="cookie" i]',
-    '[id*="privacy" i]',
-    '[class*="privacy" i]',
-    'main',
-    'article',
-    '[role="main"]',
-    '.terms',
-    '.privacy-policy',
-    '.terms-of-service',
-    '.cookie-policy',
-    '#content',
-    '.content'
-  ];
-
-  const candidates = [];
-  const seenNodes = new Set();
-
-  for (const selector of selectors) {
-    document.querySelectorAll(selector).forEach((node) => {
-      if (seenNodes.has(node) || !isVisible(node)) {
-        return;
-      }
-
-      seenNodes.add(node);
-
-      const text = getNodeText(node);
-
-      const minLength = ['main', 'article', '#content', '.content'].includes(
-        selector
-      )
-        ? 400
-        : 120;
-
-      if (text && text.length >= minLength) {
-        candidates.push({ node, text, selector });
-      }
-    });
-  }
-
-  const cookieMarkers =
-    /(cookie|cookies|consent|personal data|advertising partner|similar technolog|terms|conditions|privacy|policy|legal|accept|agree|acknowledge)/i;
-
-  const cookieMarkerCount =
-    /(cookie|cookies|consent|personal data|advertising partner|similar technolog|terms|conditions|privacy|policy|legal|accept|agree|acknowledge)/gi;
-
-  const cookieCandidate = candidates
-    .filter((candidate) => cookieMarkers.test(candidate.text))
-    .sort((left, right) => {
-      const leftPriority = /(cookie|consent|terms|privacy|legal|dialog|modal)/i.test(
-        left.selector
-      )
-        ? 100
-        : 0;
-
-      const rightPriority = /(cookie|consent|terms|privacy|legal|dialog|modal)/i.test(
-        right.selector
-      )
-        ? 100
-        : 0;
-
-      const leftScore =
-        leftPriority +
-        (left.text.match(cookieMarkerCount) || []).length * 10 -
-        left.text.length / 1000;
-
-      const rightScore =
-        rightPriority +
-        (right.text.match(cookieMarkerCount) || []).length * 10 -
-        right.text.length / 1000;
-
-      return rightScore - leftScore;
-    })[0];
+  console.log('NexusKitty [DIAG]: STEP_3 final bannerText length =', bannerText.length);
 
   let bestLocalText = '';
 
-  if (cookieCandidate) {
-    const linksTextLength = Array.from(
-      cookieCandidate.node.querySelectorAll('a, button')
-    ).reduce((acc, el) => acc + (el.textContent || '').length, 0);
+  // FIX: previously this ran whenever there was no dedicatedPageText,
+  // regardless of whether a real active consent popup (bannerText) had
+  // already been captured. cookieMarkers is a broad regex (matches
+  // "policy", "terms", "legal", "conditions" etc.), so on a page whose
+  // ordinary content happens to use those words a lot (e.g. a general
+  // article about German economic/social "policy"), the ENTIRE
+  // main/article text could get picked up here as a false-positive
+  // "cookie-related" candidate and appended as [Extracted Local Section]
+  // right alongside the real [Active Consent Popup] section - diluting
+  // the actual banner content with thousands of characters of unrelated
+  // page text and making the LLM undervalue (or overlook) the real
+  // consent choices. Skip this fallback entirely once a substantial
+  // active popup has already been captured; the popup already answers
+  // the "what happens if you click things on this page" question this
+  // fallback exists for.
+  if (!dedicatedPageText && bannerText.length < 150) {
+    const selectors = [
+      '[role="dialog"]', '[aria-modal="true"]',
+      '[id*="cookie" i]', '[class*="cookie" i]',
+      '[id*="consent" i]', '[class*="consent" i]',
+      '[data-testid*="cookie" i]',
+      '[id*="privacy" i]', '[class*="privacy" i]',
+      'main', 'article', '[role="main"]',
+      '.terms', '.privacy-policy', '.terms-of-service', '.cookie-policy',
+      '#content', '.content'
+    ];
 
-    // Avoid normal navigation menus.
-    if (
-      !(
-        linksTextLength / Math.max(cookieCandidate.text.length, 1) > 0.6 &&
-        !isLegalPage
-      )
-    ) {
-      bestLocalText = cookieCandidate.text.slice(0, BANNER_BUDGET);
+    const candidates = [];
+    const seenNodes = new Set();
+
+    console.log('NexusKitty [DIAG]: STEP_4 local-candidate scan starting');
+
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (seenNodes.has(node) || !isVisible(node)) {
+          return;
+        }
+
+        seenNodes.add(node);
+
+        const text = getNodeText(node);
+
+        const minLength = ['main', 'article', '#content', '.content'].includes(
+          selector
+        )
+          ? 400
+          : 120;
+
+        if (text && text.length >= minLength) {
+          candidates.push({ node, text, selector });
+        }
+      });
     }
+
+    const cookieMarkers =
+      /(cookie|cookies|consent|personal data|advertising partner|similar technolog|terms|conditions|privacy|policy|legal|accept|agree|acknowledge)/i;
+
+    const cookieMarkerCount =
+      /(cookie|cookies|consent|personal data|advertising partner|similar technolog|terms|conditions|privacy|policy|legal|accept|agree|acknowledge)/gi;
+
+    const cookieCandidate = candidates
+      .filter((candidate) => cookieMarkers.test(candidate.text))
+      .sort((left, right) => {
+        const leftPriority = /(cookie|consent|terms|privacy|legal|dialog|modal)/i.test(
+          left.selector
+        )
+          ? 100
+          : 0;
+
+        const rightPriority = /(cookie|consent|terms|privacy|legal|dialog|modal)/i.test(
+          right.selector
+        )
+          ? 100
+          : 0;
+
+        const leftScore =
+          leftPriority +
+          (left.text.match(cookieMarkerCount) || []).length * 10 -
+          left.text.length / 1000;
+
+        const rightScore =
+          rightPriority +
+          (right.text.match(cookieMarkerCount) || []).length * 10 -
+          right.text.length / 1000;
+
+        return rightScore - leftScore;
+      })[0];
+
+    console.log(
+      'NexusKitty [DIAG]: STEP_4 candidates found =', candidates.length,
+      'cookieCandidate =', cookieCandidate ? { selector: cookieCandidate.selector, textLength: cookieCandidate.text.length, preview: cookieCandidate.text.slice(0, 150), node: cookieCandidate.node } : null
+    );
+
+    if (cookieCandidate) {
+      const linksTextLength = Array.from(
+        cookieCandidate.node.querySelectorAll('a, button')
+      ).reduce((acc, el) => acc + (el.textContent || '').length, 0);
+
+      if (
+        !(
+          linksTextLength / Math.max(cookieCandidate.text.length, 1) > 0.6 &&
+          !isLegalPage
+        )
+      ) {
+        bestLocalText = cookieCandidate.text.slice(0, BANNER_BUDGET);
+      }
+    }
+  } else {
+    console.log(
+      'NexusKitty [DIAG]: STEP_4 skipped (dedicatedPageText available =', Boolean(dedicatedPageText),
+      ', bannerText length =', bannerText.length, ')'
+    );
   }
 
-  /*
-   * 3. Fetch linked legal pages ONLY when the current page appears relevant.
-   */
+  console.log('NexusKitty [DIAG]: STEP_4 bestLocalText length =', bestLocalText.length);
 
-  let fetchedPagesText = '';
+  const sections = [];
 
-  const shouldFetchLegalPages = Boolean(
-    isLegalPage ||
-      extractedBannerText ||
-      bestLocalText ||
-      /(terms|privacy|cookie|legal|policy|gdpr)/i.test(window.location.href)
-  );
-
-  if (shouldFetchLegalPages) {
-    const legalLinks = findLegalLinks();
-
-    if (legalLinks.length > 0) {
-      const pageTexts = await Promise.all(
-        legalLinks.map((link) => fetchLegalPageText(link.href))
-      );
-
-      fetchedPagesText = pageTexts
-        .filter((text) => text.length > 200)
-        .join('\n\n--- NEXT LEGAL SECTION ---\n\n');
-    }
+  if (bannerText) {
+    sections.push(`[Active Consent Popup / Cookie Banner]\n${bannerText}`);
   }
 
-  /*
-   * 4. Combine everything.
-   */
-
-  let combinedResult = '';
-
-  if (extractedBannerText) {
-    combinedResult +=
-      `[Cookie Banner / Consent Dialog]\n` + `${extractedBannerText}\n\n`;
+  if (dedicatedPageText) {
+    sections.push(`[Main Document]\n${dedicatedPageText}`);
   } else if (bestLocalText) {
-    combinedResult += `[Extracted Local Section]\n` + `${bestLocalText}\n\n`;
+    sections.push(`[Extracted Local Section]\n${bestLocalText}`);
   }
 
   if (fetchedPagesText) {
-    combinedResult += `[Auto-Fetched Linked Policies]\n` + fetchedPagesText;
+    sections.push(`[Auto-Fetched Linked Policies]\n${fetchedPagesText}`);
   }
 
-  combinedResult = combinedResult.trim();
+  const combinedResult = sections.join('\n\n').trim();
+
+  console.log('NexusKitty [DIAG]: STEP_5 combinedResult length =', combinedResult.length);
 
   if (combinedResult.length > 100) {
+    console.log('NexusKitty [DIAG]: RETURN via STEP_5 (combinedResult)');
     return combinedResult.slice(0, MAX_TEXT_LENGTH);
   }
 
-  /*
-   * Final fallback: kept so ordinary pages can still be analyzed.
-   */
+  // FIX: previously this read document.body.innerText/textContent
+  // directly, with NO filtering at all - unlike every other extraction
+  // path in this file. When innerText happened to be empty (e.g. scan ran
+  // before paint), it fell back to textContent, which does NOT respect
+  // display:none and - critically - exposes the literal, unparsed markup
+  // inside <noscript> tags as raw text once scripting is enabled (e.g. a
+  // Google Tag Manager <noscript><iframe src="...googletagmanager.com...">
+  // snippet), because the browser treats <noscript> content as a plain
+  // text node rather than child elements when JS is on. That's exactly
+  // what showed up as analyzed "content" for home.abv.bg. Reusing
+  // getTextExcludingOverlays(), which already strips script/style/
+  // noscript/svg and known CMP overlay selectors everywhere else in this
+  // file, fixes it here too.
+  const fallback = getTextExcludingOverlays(document.body)
+    || cleanText(document.body?.innerText || '');
 
-  const fallback = cleanText(
-    document.body?.innerText || document.body?.textContent || ''
-  );
+  console.log('NexusKitty [DIAG]: FINAL FALLBACK document.body text length =', fallback.length);
 
-  return fallback.length > 300
-    ? fallback.slice(0, MAX_TEXT_LENGTH)
-    : 'No readable text found on this page.';
+  if (fallback.length > 300) {
+    console.log('NexusKitty [DIAG]: RETURN via FINAL FALLBACK (body text)');
+    return fallback.slice(0, MAX_TEXT_LENGTH);
+  }
+console.log('NexusKitty [DIAG]: RETURN via FINAL FALLBACK (literal "No readable text" message)');
+
+  console.log('[NEXUSKITTY FALLBACK CREATED]', {
+    url: location.href,
+    readyState: document.readyState,
+    bodyTextLength: document.body?.innerText?.length || 0
+  });
+
+  return 'No readable text found on this page.';
 }
-
-/* =========================================================
-   TRACKER DETECTION
-   ========================================================= */
 
 const KNOWN_TRACKER_DOMAINS = [
   'google-analytics.com', 'analytics.google.com', 'googletagmanager.com',
@@ -1172,8 +1390,6 @@ const KNOWN_TRACKER_DOMAINS = [
   'crwdcntrl.net', 'agkn.com', 'addthis.com', 'sharethis.com'
 ];
 
-// Only KNOWN tracking/advertising domains are reported. Fonts, CDNs and the
-// consent manager itself (e.g. cookielaw.org) are not trackers.
 function detectTrackers() {
   const currentHost = window.location.hostname;
   const found = new Set();
@@ -1194,16 +1410,12 @@ function detectTrackers() {
         found.add(host);
       }
     } catch {
-      // Ignore malformed URLs.
+      // ignore malformed URLs
     }
   }
 
   return [...found];
 }
-
-/* =========================================================
-   CONSENT BUTTON DETECTION
-   ========================================================= */
 
 function isExplicitConsentButton(element) {
   if (!element || !isVisible(element)) {
@@ -1221,16 +1433,12 @@ function isExplicitConsentButton(element) {
     return false;
   }
 
-  // A consent button only matters when it sits inside a real consent/legal
-  // context. Without this, ordinary UI buttons ("Decline", "Accept", "OK")
-  // on unrelated pages get tagged with NK badges.
   const pageIsLegal = LEGAL_URL_REGEX.test(window.location.href);
   const inConsentContainer = Boolean(
     element.closest(CONSENT_SELECTORS.join(',')) ||
     element.closest('[role="dialog"], [aria-modal="true"]')
   );
 
-  // Strong consent phrases.
   const strictConsentPhrases =
     /(i agree|accept terms|accept all|agree to terms|accept privacy|accept policy|accept cookies|reject all|decline|refuse|manage cookies|cookie settings|privacy settings|policy settings|allow all|allow essential cookies|allow cookies|essential cookies)/i;
 
@@ -1238,7 +1446,6 @@ function isExplicitConsentButton(element) {
     return inConsentContainer || pageIsLegal;
   }
 
-  // Short labels.
   const shortPhrases = /^(ok|accept|agree|allow|settings|preferences)$/i;
 
   if (shortPhrases.test(text)) {
@@ -1257,16 +1464,8 @@ function isExplicitConsentButton(element) {
 
 function findConsentButtons() {
   const selectors = [
-    'button',
-    'input[type="button"]',
-    'input[type="submit"]',
-    '[role="button"]',
-    'a'
+    'button', 'input[type="button"]', 'input[type="submit"]', '[role="button"]', 'a'
   ];
-
-  /*
-   * PASS 1: Structural containers.
-   */
 
   const structuralContainers = getConsentContainers();
 
@@ -1283,10 +1482,6 @@ function findConsentButtons() {
       return result;
     }
   }
-
-  /*
-   * PASS 2: Legal-page forms.
-   */
 
   const legalPageButtons = Array.from(
     document.querySelectorAll(
@@ -1319,18 +1514,10 @@ function findConsentButtons() {
     }
   }
 
-  /*
-   * PASS 3: Full button scan, only after structural detection fails.
-   */
-
   return Array.from(document.querySelectorAll(selectors.join(','))).filter(
     (element) => isExplicitConsentButton(element)
   );
 }
-
-/* =========================================================
-   CONSENT SNAPSHOT
-   ========================================================= */
 
 function getConsentSnapshot() {
   return findConsentButtons()
@@ -1356,41 +1543,37 @@ function getConsentSnapshot() {
     .filter((button) => button.label);
 }
 
-/* =========================================================
-   MODULE STATE
-   ---------------------------------------------------------
-   These were referenced (loadDomainSettings, isDomainDisabledSync,
-   scheduleConsentHudUpdate) without ever being declared, which threw
-   "ReferenceError: domainSettingsLoaded is not defined" at the very
-   start of initContentScript() and aborted the whole content script
-   before any page text extraction or link-following could run.
-   ========================================================= */
 let domainDisabled = false;
 let domainSettingsLoaded = false;
 let observerTimer = null;
 
-// Populated when a content-script instance running INSIDE a cross-origin
-// CMP iframe (e.g. Sourcepoint) detects and relays its own rendered consent
-// text up to this (top-frame) instance via background.js. Same-Origin Policy
-// makes it impossible to read that iframe's DOM directly from here.
 let receivedIframeConsentText = '';
 
-// FIX: Debounced re-analysis trigger. When a relayed iframe consent text
-// arrives, it usually does so AFTER the top frame's initial
-// buildPagePayload() already ran (the iframe needs time to load and
-// hydrate). Without this, receivedIframeConsentText would sit unused until
-// some unrelated event (like a DOM mutation) happened to trigger another
-// analysis pass. This makes the relay itself trigger a fresh, forced
-// (non-cached) analysis once enough text has arrived.
 let iframeRelayReanalysisTimer = null;
 let lastReanalyzedIframeTextLength = 0;
+let lastSentPageSignature = '';
+
+function computePageSignature(payload) {
+  if (!payload) return '';
+  const parts = [
+    window.location.href,
+    payload.text || '',
+    Array.isArray(payload.detected_trackers) ? payload.detected_trackers.join('|') : '',
+    Array.isArray(payload.consent_controls) ? payload.consent_controls.map((c) => c.text || c.label || '').join('|') : '',
+  ];
+  const raw = parts.join('\x00');
+  let hash = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(36);
+}
 
 function scheduleReanalysisAfterIframeRelay() {
   if (isDomainDisabledSync()) {
     return;
   }
 
-  // Avoid re-triggering repeatedly for the same (or shorter) text.
   if (receivedIframeConsentText.length <= lastReanalyzedIframeTextLength) {
     return;
   }
@@ -1399,10 +1582,6 @@ function scheduleReanalysisAfterIframeRelay() {
     clearTimeout(iframeRelayReanalysisTimer);
   }
 
-  // Small debounce: multiple relay messages can arrive in quick succession
-  // (see scheduleIframeReports at the bottom of this file, which reports at
-  // 0ms/800ms/2000ms), so wait briefly for them to settle before
-  // re-running the (potentially expensive) extraction + backend analysis.
   iframeRelayReanalysisTimer = setTimeout(async () => {
     iframeRelayReanalysisTimer = null;
 
@@ -1413,41 +1592,39 @@ function scheduleReanalysisAfterIframeRelay() {
     lastReanalyzedIframeTextLength = receivedIframeConsentText.length;
 
     try {
-      // force_refresh: bypass the cache, since the cached payload was built
-      // before the iframe text was available.
       const payload = await buildPagePayload(true);
 
-      // Keep compatibility with the existing page-text storage, same as
-      // initContentScript() does on first load.
       if (payload?.text?.length > 0) {
+        const signature = computePageSignature(payload);
+        if (signature && signature === lastSentPageSignature) {
+          return;
+        }
+        lastSentPageSignature = signature;
+
         try {
           await chrome.storage.local.set({
             [`nexuskitty_page_${window.location.href}`]: payload.text
           });
-        } catch (error) {
-          console.debug('NexusKitty: Could not save page text after iframe relay.', error);
-        }
-      }
+        } catch (error) {}
 
-      // Notify background.js so it can (re-)send the updated payload to the
-      // backend for analysis, same as the initial page load flow.
-      try {
-        await chrome.runtime.sendMessage({
-          type: 'NEXUSKITTY_PAGE_DATA_UPDATED',
-          payload
+        console.log('[NEXUSKITTY REANALYSIS]', {
+          url: location.href,
+          textLength: payload?.text?.length || 0,
+          textPreview: payload?.text?.slice(0, 500) || '',
+          reason: 'iframe_relay_reanalysis',
+          timestamp: Date.now()
         });
-      } catch (error) {
-        console.debug('NexusKitty: Could not notify background of updated payload.', error);
+
+        try {
+          await chrome.runtime.sendMessage({
+            type: 'NEXUSKITTY_PAGE_DATA_UPDATED',
+            payload
+          });
+        } catch (error) {}
       }
-    } catch (error) {
-      console.debug('NexusKitty: Re-analysis after iframe relay failed.', error);
-    }
+    } catch (error) {}
   }, 400);
 }
-
-/* =========================================================
-   DOMAIN SETTINGS
-   ========================================================= */
 
 async function loadDomainSettings() {
   if (domainSettingsLoaded) {
@@ -1465,7 +1642,6 @@ async function loadDomainSettings() {
 
     domainDisabled = disabledDomains.includes(domain);
   } catch (error) {
-    console.debug('NexusKitty: Could not read disabledDomains.', error);
     domainDisabled = false;
   } finally {
     domainSettingsLoaded = true;
@@ -1493,7 +1669,6 @@ function removeRiskOutlines() {
   });
 }
 
-// React to the domain being enabled/disabled from the popup without a reload.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.disabledDomains) {
     return;
@@ -1510,14 +1685,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     removeAllHuds();
     removeRiskOutlines();
   } else {
-    // Re-apply the last known verdict for the newly enabled domain.
     applyRiskWarning(lastCategories, lastShouldWarn);
   }
 });
-
-/* =========================================================
-   HUD
-   ========================================================= */
 
 function createConsentHud(button) {
   if (!button) {
@@ -1580,17 +1750,6 @@ function removeConsentHud(button) {
   if (hud) hud.remove();
 }
 
-function injectConsentHud() {
-  // The NK badge is now only rendered after the backend confirms a real
-  // data-privacy risk. Scanning the DOM here used to tag every consent
-  // button on every page, even when the analysis found no danger.
-  return;
-}
-
-/* =========================================================
-   CACHE
-   ========================================================= */
-
 function getPageCacheKey() {
   try {
     const url = new URL(window.location.href);
@@ -1616,9 +1775,7 @@ async function readPageCache() {
     ) {
       return cached.payload;
     }
-  } catch (error) {
-    console.debug('NexusKitty: Could not read page cache.', error);
-  }
+  } catch (error) {}
 
   return null;
 }
@@ -1633,15 +1790,9 @@ async function writePageCache(payload) {
         payload
       }
     });
-  } catch (error) {
-    console.debug('NexusKitty: Could not write page cache.', error);
-  }
+  } catch (error) {}
 }
 
-/*
- * Expired entries were only ignored on read, never deleted, so storage
- * grew forever. Prune at most once per TTL.
- */
 async function pruneExpiredCache() {
   try {
     const { nk_last_prune: lastPrune = 0 } = await chrome.storage.local.get(
@@ -1665,71 +1816,96 @@ async function pruneExpiredCache() {
     }
 
     await chrome.storage.local.set({ nk_last_prune: Date.now() });
-  } catch (error) {
-    console.debug('NexusKitty: Could not prune cache.', error);
-  }
+  } catch (error) {}
 }
 
-/* =========================================================
-   ZERO-FAILURE ASYNC EXTRACTION PIPELINE
-   ========================================================= */
+async function translateTextToEnglish(text) {
+  if (!text || !text.trim()) {
+    return { text: text || '', detectedLang: null, translated: false };
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'NEXUSKITTY_TRANSLATE_TEXT',
+      text
+    });
+
+    if (response?.ok && response.text) {
+      return {
+        text: response.text,
+        detectedLang: response.detectedLang || null,
+        translated: response.translated === true
+      };
+    }
+  } catch (error) {
+    console.debug('NexusKitty: translation relay failed, using original text.', error?.message || error);
+  }
+
+  return { text, detectedLang: null, translated: false };
+}
 
 async function extractDocumentTextAsync() {
+  try {
+    const text = await extractMainText();
+
+    console.log('NexusKitty [DIAG]: extractDocumentTextAsync() using extractMainText() result, length =', text ? text.length : 0);
+
+    if (text && text.trim().length >= 20 && text !== 'No readable text found on this page.') {
+      return { source: 'zero_failure', text };
+    }
+  } catch (error) {
+    console.error('NexusKitty: extractMainText() failed inside extractDocumentTextAsync(), falling back.', error);
+  }
+
   let extractedText = "";
 
-  // 1. Direct Cookiebot / CMP Text Aggregation (DOM + Shadow DOM + Iframes)
-  const cmpNodes = document.querySelectorAll('#CybotCookiebotDialog, #CookiebotWidget, [id*="Cookiebot"], [id*="cmpbox"], [class*="cookie"]');
-  cmpNodes.forEach(node => {
-    extractedText += " " + (node.innerText || node.textContent || "");
-  });
-
-  // 2. JS Global Object Inspection (Cookiebot state)
   try {
+    const cmpNodes = document.querySelectorAll('#CybotCookiebotDialog, #CookiebotWidget, [id*="Cookiebot"], [id*="cmpbox"], [class*="cookie"]');
+    cmpNodes.forEach(node => {
+      extractedText += " " + (node.innerText || node.textContent || "");
+    });
+
     if (window.Cookiebot && window.Cookiebot.decl) {
       extractedText += "\n\nCookiebot Declaration Data: " + JSON.stringify(window.Cookiebot.decl);
     }
-  } catch (e) {
-    console.warn("Could not read window.Cookiebot", e);
-  }
+  } catch (e) {}
 
-  // 3. Background Link Fetching (If DOM text is under 100 characters)
   if (extractedText.trim().length < 100) {
-    const legalLink = Array.from(document.querySelectorAll('a[href]')).find(a => {
-      const h = a.href.toLowerCase();
-      const t = a.innerText.toLowerCase();
-      return ['privacy', 'poveritelnost', 'terms', 'usloviya', 'cookie', 'biskvitki'].some(kw => h.includes(kw) || t.includes(kw));
-    });
-    if (legalLink && legalLink.href.startsWith('http')) {
-      try {
+    try {
+      const legalLink = Array.from(document.querySelectorAll('a[href]')).find(a => {
+        const h = a.href.toLowerCase();
+        const t = (a.innerText || '').toLowerCase();
+        return ['privacy', 'poveritelnost', 'terms', 'usloviya', 'cookie', 'biskvitki'].some(kw => h.includes(kw) || t.includes(kw));
+      });
+      if (legalLink && legalLink.href.startsWith('http')) {
         const html = await fetchLegalPageText(legalLink.href);
         if (html) {
           extractedText += "\n\n" + html;
         }
-      } catch (err) {
-        console.warn("Background fetch failed:", err);
       }
-    }
+    } catch (err) {}
   }
 
-  // 4. HARD FALLBACK: If EVERYTHING else is short, use document.body.innerText
   if (extractedText.trim().length < 20) {
-    extractedText = document.body.innerText || "Legal analysis fallback for site: " + window.location.hostname;
+    // FIX: previously fell back to raw, unfiltered innerText/textContent
+    // here too (same noscript-leak risk as the FINAL FALLBACK fix in
+    // extractMainText() above). Now reuses the filtered helper, and the
+    // NO_CONTENT_FALLBACK_PREFIX sentinel below is explicitly recognized
+    // as "no real content" everywhere it's checked (buildPagePayload()),
+    // so it can never be cached or sent to the backend as if it were a
+    // real document - see the bg.pons.com case in the reported logs,
+    // where this exact 45-char placeholder got analyzed as if it were
+    // real page text.
+    extractedText = getTextExcludingOverlays(document.body)
+      || (NO_CONTENT_FALLBACK_PREFIX + window.location.hostname);
   }
 
-  // ALWAYS RETURN TEXT (NEVER NULL OR EMPTY)
-  return { source: 'zero_failure', text: extractedText };
+  console.log('NexusKitty [DIAG]: extractDocumentTextAsync() using LAST-RESORT fallback, length =', extractedText.length);
+
+  return { source: 'zero_failure_fallback', text: extractedText };
 }
 
-/* =========================================================
-   PAGE PAYLOAD
-   ========================================================= */
-
 async function buildPagePayload(forceRefresh = false) {
-  /*
-   * Cache is used only when explicitly allowed.
-   * force_refresh=true always analyzes the current DOM.
-   */
-
   if (!forceRefresh) {
     const cached = await readPageCache();
 
@@ -1738,13 +1914,81 @@ async function buildPagePayload(forceRefresh = false) {
     }
   }
 
-  const text = await extractMainText();
+  let text = await extractMainText();
+
+  // If the initial extraction returned only the fallback message,
+  // the page content may be loaded dynamically (SPA, late CMP,
+  // async legal links). Use the more resilient extractDocumentTextAsync()
+  // which also checks CMP nodes, legal links, and body text.
+  if (!text || text.trim().length < 30 || text === 'No readable text found on this page.') {
+    const asyncResult = await extractDocumentTextAsync();
+    if (asyncResult?.text && asyncResult.text.trim().length > (text || '').trim().length) {
+      text = asyncResult.text;
+    }
+  }
+
+  // FIX: added the NO_CONTENT_FALLBACK_PREFIX check so the
+  // "Legal analysis fallback for site: X" placeholder (produced by
+  // extractDocumentTextAsync() as an absolute last resort) is recognized
+  // as "no real content", exactly like the empty-text and
+  // "No readable text found" cases already were. Previously this 45-ish
+  // character placeholder string passed the `length < 30` check on sites
+  // with a longer hostname and was cached/sent to the LLM as if it were
+  // a genuine legal document (see bg.pons.com in the reported logs).
+  const isFallback = !text
+    || text.trim().length < 30
+    || text === 'No readable text found on this page.'
+    || text.startsWith(NO_CONTENT_FALLBACK_PREFIX);
+
+  // If we only have the fallback, try to return a previously cached
+  // valid payload instead of caching the fallback.
+  if (isFallback && forceRefresh) {
+    const cached = await readPageCache();
+    if (
+      cached &&
+      cached.text &&
+      cached.text.trim().length >= 30 &&
+      cached.text !== 'No readable text found on this page.' &&
+      !cached.text.startsWith(NO_CONTENT_FALLBACK_PREFIX)
+    ) {
+      console.log('[NEXUSKITTY] Fallback extracted but valid cache exists, returning cached payload');
+      return cached;
+    }
+  }
+
+  // Translate the extracted text to English before analysis, so that
+  // the backend always receives a single language regardless of which
+  // language the visited page (or its legal/cookie sub-pages) is in.
+  // Runs from the service worker (see NEXUSKITTY_TRANSLATE_TEXT in
+  // background.js) to avoid the visited page's own CSP.
+  let analysisText = text;
+  let detectedLanguage = null;
+  let wasTranslated = false;
+
+  if (!isFallback) {
+    const translation = await translateTextToEnglish(text);
+    analysisText = translation.text || text;
+    detectedLanguage = translation.detectedLang;
+    wasTranslated = translation.translated;
+
+    console.log(
+      'NexusKitty [DIAG]: translation detectedLanguage =', detectedLanguage,
+      'wasTranslated =', wasTranslated,
+      'analysisText length =', analysisText.length
+    );
+  }
+
   const trackers = detectTrackers();
   const consentControls = getConsentSnapshot();
   const legalSurface = hasLegalSurface();
 
   const payload = {
     text,
+    // English text the analysis backend should use. Falls back to the
+    // original text if translation failed or wasn't needed.
+    analysis_text: analysisText,
+    detected_language: detectedLanguage,
+    translated: wasTranslated,
     trackers,
     detected_trackers: trackers,
     consent_controls: consentControls,
@@ -1754,14 +1998,16 @@ async function buildPagePayload(forceRefresh = false) {
     title: document.title || ''
   };
 
-  await writePageCache(payload);
+  // Only write to cache if we have meaningful content (not the fallback).
+  // This prevents a transient failed extraction from overwriting a valid cache.
+  if (!isFallback) {
+    await writePageCache(payload);
+  } else {
+    console.log('[NEXUSKITTY] Skipping cache write for fallback-only payload');
+  }
 
   return payload;
 }
-
-/* =========================================================
-   RISK WARNING
-   ========================================================= */
 
 async function applyRiskWarning(categories, shouldWarn) {
   if (isDomainDisabledSync()) {
@@ -1787,13 +2033,8 @@ async function applyRiskWarning(categories, shouldWarn) {
   });
 }
 
-/* =========================================================
-   MESSAGE HANDLING
-   ========================================================= */
-
 async function handleMessage(request, sender, sendResponse) {
   try {
-    // Request current page data (legacy).
     if (request && request.type === 'NEXUSKITTY_GET_PAGE_DATA') {
       const payload = await buildPagePayload(request.force_refresh === true);
 
@@ -1805,21 +2046,51 @@ async function handleMessage(request, sender, sendResponse) {
       return;
     }
 
-    // NEW: Async multi-layer document text extraction.
     if (request && request.type === 'NEXUSKITTY_GET_DOCUMENT_TEXT') {
       const result = await extractDocumentTextAsync();
+
+      // FIX: previously this returned only {source, text, fetchedUrl}, which
+      // forced popup.js to make a SECOND separate message round-trip
+      // (NEXUSKITTY_GET_PAGE_DATA) just to also get trackers/consent_controls
+      // /legal_surface. That second call ran extractMainText() a second,
+      // fully independent time - doubling all the network fetches (legal
+      // links, consent iframes) and risking the two calls seeing two
+      // slightly different DOM states (e.g. banner dismissed in between),
+      // so state.text and state.trackers/consent_controls could describe
+      // two different moments. Computing these here (cheap, no extra
+      // extraction pass) lets popup.js get everything in ONE call.
+      const trackers = detectTrackers();
+      const consentControls = getConsentSnapshot();
+      const legalSurface = hasLegalSurface();
+
+      let analysisText = result.text;
+      let detectedLanguage = null;
+      let wasTranslated = false;
+
+      if (result.text && result.text.trim().length >= 30) {
+        const translation = await translateTextToEnglish(result.text);
+        analysisText = translation.text || result.text;
+        detectedLanguage = translation.detectedLang;
+        wasTranslated = translation.translated;
+      }
 
       sendResponse({
         ok: true,
         source: result.source,
         text: result.text,
+        analysis_text: analysisText,
+        detected_language: detectedLanguage,
+        translated: wasTranslated,
+        trackers,
+        detected_trackers: trackers,
+        consent_controls: consentControls,
+        legal_surface: legalSurface,
         fetchedUrl: result.fetchedUrl || null
       });
 
       return;
     }
 
-    // Receive analysis result.
     if (request && request.type === 'NEXUSKITTY_ANALYSIS_RESULT') {
       lastCategories = request.categories || [];
       lastShouldWarn = request.should_warn === true;
@@ -1834,8 +2105,6 @@ async function handleMessage(request, sender, sendResponse) {
       return;
     }
 
-    // Consent text relayed from a cross-origin CMP iframe running its own
-    // content-script instance (see background.js NEXUSKITTY_IFRAME_CONSENT_TEXT).
     if (request && request.type === 'NEXUSKITTY_IFRAME_CONSENT_TEXT_RELAY') {
       if (request.text && request.text.length > receivedIframeConsentText.length) {
         receivedIframeConsentText = request.text;
@@ -1843,11 +2112,6 @@ async function handleMessage(request, sender, sendResponse) {
           `NexusKitty [debug]: received consent text relayed from cross-origin iframe (${request.frameUrl || 'unknown frame'}), length = ${receivedIframeConsentText.length}`
         );
 
-        // FIX: Previously this text was only stored and never consumed
-        // again unless some unrelated DOM mutation happened to trigger a
-        // fresh analysis. Now the relay itself schedules a forced
-        // re-analysis so the newly-arrived banner text actually reaches
-        // extractMainText() / the backend.
         scheduleReanalysisAfterIframeRelay();
       }
 
@@ -1870,7 +2134,6 @@ async function handleMessage(request, sender, sendResponse) {
   }
 }
 
-// Register listener BEFORE initialization.
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) {
     return false;
@@ -1878,13 +2141,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   handleMessage(request, sender, sendResponse);
 
-  // Required because the response is asynchronous.
   return true;
 });
-
-/* =========================================================
-   MUTATION OBSERVER
-   ========================================================= */
 
 const BUTTON_SELECTOR =
   'button, [role="button"], input[type="button"], input[type="submit"]';
@@ -1899,26 +2157,22 @@ function mutationLooksRelevant(mutation) {
       continue;
     }
 
-    // Ignore our own HUD.
     if (node.classList?.contains('nexuskitty-consent-hud')) {
       continue;
     }
 
-    // Check the newly inserted subtree only.
     const consentContainers = findConsentContainersInNode(node);
 
     if (consentContainers.length) {
       return true;
     }
 
-    // Direct button check.
     if (node.matches?.(BUTTON_SELECTOR)) {
       if (isExplicitConsentButton(node)) {
         return true;
       }
     }
 
-    // If the subtree contains likely buttons, inspect only those.
     const buttons = node.querySelectorAll?.(BUTTON_SELECTOR);
 
     if (buttons?.length) {
@@ -1933,8 +2187,6 @@ function mutationLooksRelevant(mutation) {
   return false;
 }
 
-// Tracks the last analysis verdict so the HUD/outlines can be re-applied
-// when the DOM changes (e.g. a consent banner renders after analysis).
 let lastShouldWarn = false;
 let lastCategories = [];
 
@@ -1949,39 +2201,24 @@ function scheduleConsentHudUpdate() {
   }, HUD_UPDATE_DELAY);
 }
 
-/* =========================================================
-   INITIALIZATION
-   ========================================================= */
-
 async function initContentScript() {
   try {
-    // Read disabledDomains only once.
     await loadDomainSettings();
 
-    // Initial page analysis (skipped on disabled domains; the observer stays
-    // registered so re-enabling the domain works without a reload).
     const payload = isDomainDisabledSync()
       ? null
       : await buildPagePayload(false);
 
-    // Keep compatibility with the existing page-text storage.
     if (payload?.text?.length > 0) {
       try {
         await chrome.storage.local.set({
           [`nexuskitty_page_${window.location.href}`]: payload.text
         });
-      } catch (error) {
-        console.debug('NexusKitty: Could not save page text.', error);
-      }
+      } catch (error) {}
     }
 
-    // Housekeeping (throttled to once per TTL).
     pruneExpiredCache();
 
-    /*
-     * Observe only childList changes (not attributes / characterData)
-     * to avoid a huge number of callbacks on React/Vue/Angular pages.
-     */
     const observer = new MutationObserver((mutations) => {
       if (isDomainDisabledSync()) {
         return;
@@ -2005,7 +2242,6 @@ async function initContentScript() {
       });
     }
 
-    // Delayed scans for consent managers that appear after page load.
     setTimeout(() => {
       if (!isDomainDisabledSync()) {
         scheduleConsentHudUpdate();
@@ -2018,32 +2254,22 @@ async function initContentScript() {
       }
     }, 3000);
   } catch (error) {
-    // Never allow one initialization error to destroy the content script.
     console.error('NexusKitty: Content script initialization failed.', error);
   }
 }
 
-/* =========================================================
-   CROSS-ORIGIN IFRAME CONSENT DETECTION (this frame IS an iframe)
-   ---------------------------------------------------------
-   With "all_frames": true in the manifest, this script also runs inside
-   every iframe on the page - including cross-origin CMP iframes (e.g.
-   Sourcepoint) that the TOP frame's JavaScript can never read directly
-   because of the Same-Origin Policy. Running here, inside the iframe's own
-   execution context, sidesteps that restriction entirely: we see the fully
-   JS-rendered DOM, not just the empty server-sent HTML shell a plain
-   fetch() would return. If this looks like a consent/CMP surface, relay the
-   extracted text up to the top frame via background.js.
-   ========================================================= */
-
 function detectOwnFrameConsentText() {
   const popup = getActiveConsentPopup();
+
   if (popup && popup.text && popup.text.length >= 80) {
-    return popup.text;
+    // Reject text that looks like minified JavaScript / SDK loader code
+    // rather than actual consent UI text.
+    const looksLikeJsCode = /function\s*\(\)\s*\{|var\s+\w+\s*=|postMessage\(|CookieConsentBulkSetting|handleRequest/.test(popup.text);
+    if (!looksLikeJsCode) {
+      return popup.text;
+    }
   }
 
-  // Fallback: recognizable CMP markup (e.g. Sourcepoint's sp_choice_type_*
-  // buttons) even when it doesn't match a known container selector.
   const spNode = document.querySelector(
     '.message.type-modal, [class*="sp_choice_type"], #notice.message, [class*="message-component"]'
   );
@@ -2052,41 +2278,38 @@ function detectOwnFrameConsentText() {
     const container = spNode.closest('.message, [role="dialog"], [aria-modal="true"], body') || spNode;
     const text = getNodeText(container);
     if (text && text.length >= 80) {
-      return text;
+      const looksLikeJsCode = /function\s*\(\)\s*\{|var\s+\w+\s*=|postMessage\(|CookieConsentBulkSetting|handleRequest/.test(text);
+      if (!looksLikeJsCode) {
+        return text;
+      }
     }
   }
 
   return '';
 }
 
+let lastReportedIframeConsentText = '';
+
 function reportIframeConsentText() {
   try {
     const text = detectOwnFrameConsentText();
 
-    if (text) {
+    if (text && text !== lastReportedIframeConsentText) {
+      lastReportedIframeConsentText = text;
       chrome.runtime.sendMessage({
         type: 'NEXUSKITTY_IFRAME_CONSENT_TEXT',
         text,
         frameUrl: window.location.href,
       }).catch(() => {});
+    } else if (!text && window.location.hostname.includes('cookiebot')) {
+      console.log('[NEXUSKITTY] Iframe consent text rejected (JS code / SDK):', window.location.href);
     }
-  } catch (err) {
-    console.debug('NexusKitty: iframe consent detection failed', err);
-  }
+  } catch (err) {}
 }
 
-/* =========================================================
-   START
-   ========================================================= */
-
 if (window.self !== window.top) {
-  // Inside an iframe: only try to detect and relay consent/CMP content.
-  // Never run the full page pipeline (mutation observer, badge, cache,
-  // domain settings, etc.) inside an arbitrary third-party iframe.
   const scheduleIframeReports = () => {
     reportIframeConsentText();
-    // CMP content is frequently rendered asynchronously after the iframe's
-    // own load event, so check again a couple of times.
     setTimeout(reportIframeConsentText, 800);
     setTimeout(reportIframeConsentText, 2000);
   };

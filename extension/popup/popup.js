@@ -8,7 +8,7 @@ const state = {
   analysis: null,
   filter: 'all',
   isDisabled: false,
-  chatHistory: [],
+  historyCache: [],
 };
 
 const elements = {
@@ -16,14 +16,11 @@ const elements = {
   loading: document.getElementById('loadingState'),
   analysis: document.getElementById('analysisState'),
   error: document.getElementById('errorState'),
-  score: document.getElementById('scoreValue'),
-  scoreLabel: document.getElementById('scoreLabel'),
   issueCount: document.getElementById('issueCount'),
   issueBreakdown: document.getElementById('issueBreakdown'),
   riskWhy: document.getElementById('riskWhy'),
   risk: document.getElementById('riskPill'),
   summary: document.getElementById('summaryText'),
-  ring: document.querySelector('.score-ring'),
   banner: document.getElementById('hypocrisyBanner'),
   findings: document.getElementById('findingsList'),
   history: document.getElementById('historyList'),
@@ -43,12 +40,10 @@ function setStatus(online) {
   elements.status.classList.toggle('offline', !online);
 }
 
-function showLoading(message = 'Analyzing...') {
+function showLoading() {
   elements.loading?.classList.remove('hidden');
   elements.analysis?.classList.add('hidden');
   elements.error?.classList.add('hidden');
-  const loadingText = elements.loading?.querySelector('p');
-  if (loadingText) loadingText.textContent = message;
 }
 
 function showError(message, allowOverride = false, allowReenable = false) {
@@ -86,26 +81,6 @@ function showAnalysis() {
   elements.analysis?.classList.remove('hidden');
 }
 
-function riskMeta(score) {
-  if (score >= 80) return { label: 'Very safe', className: 'safe' };
-  if (score >= 50) return { label: 'Moderate risk', className: 'warning' };
-  return { label: 'High risk', className: 'danger' };
-}
-
-function renderScore(score) {
-  const meta = riskMeta(score);
-  const angle = Math.max(0, Math.min(score, 100)) * 3.6;
-  if (elements.score) elements.score.textContent = score;
-  if (elements.scoreLabel) elements.scoreLabel.textContent = meta.label;
-  if (elements.risk) {
-    elements.risk.textContent = meta.label;
-    elements.risk.className = `risk-pill ${meta.className}`;
-  }
-  if (elements.ring) {
-    elements.ring.style.background = `conic-gradient(var(--acid) 0deg ${angle}deg, rgba(255,255,255,0.08) ${angle}deg 360deg)`;
-  }
-}
-
 function renderFindings(findings = []) {
   const visible = state.filter === 'all'
     ? findings
@@ -138,6 +113,15 @@ function updateBadgeAlert(needsAttention) {
   } else {
     chrome.action.setBadgeText({ text: '', tabId: state.tabId });
   }
+}
+
+function formatScanDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return escapeHtml(String(value));
+  }
+  return escapeHtml(date.toLocaleString());
 }
 
 function renderAnalysis(result) {
@@ -193,6 +177,7 @@ function renderAnalysis(result) {
   elements.summary.textContent = result.summary || 'No summary available.';
   renderFindings(findings);
   renderTechnicalSignals(result);
+  renderCookieBreakdown(result);
 
   const alert = result.hypocrisy_alert;
   const highRiskCount = findings.filter((f) => f.attention_level === 'HIGH').length;
@@ -210,10 +195,32 @@ function renderAnalysis(result) {
     elements.banner.classList.remove('hidden');
   }
 
+  // Time Machine: keep this panel visible whenever we have a previous
+  // snapshot to compare against, not only when the document changed.
+  // Previously the box only appeared on a real diff and silently stayed
+  // hidden (or stale) on every later scan of an unchanged document.
   const diffBox = document.getElementById('semanticDiffBox');
-  if (diffBox && result.semantic_diff?.has_changed) {
-    diffBox.classList.remove('hidden');
-    diffBox.innerHTML = `<strong>Time Machine: document changed</strong>${result.semantic_diff.changes.map((change) => `<div class="diff-${change.type}">${change.type === 'added' ? '+' : '-'}${escapeHtml(change.text)}</div>`).join('')}`;
+  if (diffBox) {
+    if (result.semantic_diff) {
+      diffBox.classList.remove('hidden');
+
+      if (result.semantic_diff.has_changed) {
+        const changesHtml = (result.semantic_diff.changes || [])
+          .map((change) => `<div class="diff-${change.type}">${change.type === 'added' ? '+' : '-'}${escapeHtml(change.text)}</div>`)
+          .join('');
+
+        diffBox.innerHTML = `<strong>Time Machine: document changed</strong>${changesHtml}`;
+      } else {
+        const scanDate = formatScanDate(result.semantic_diff.previous_date);
+
+        diffBox.innerHTML = `<strong>Time Machine: no changes detected</strong>`
+          + `<div class="diff-none">Unchanged since the last scan${scanDate ? ` (${scanDate})` : ''}.</div>`;
+      }
+    } else {
+      // No previous snapshot exists yet for this domain (first-ever scan).
+      diffBox.classList.add('hidden');
+      diffBox.innerHTML = '';
+    }
   }
 
   if (state.tabId) {
@@ -237,10 +244,35 @@ function renderTechnicalSignals(result) {
   elements.technicalSignals.classList.remove('hidden');
   elements.technicalSignals.innerHTML = `
     <div class="technical-heading">Technical layer</div>
-    <div class="technical-title">Observed website signals</div>
-    <p>These domains were observed while the page was open. Compare them with the site's privacy disclosures.</p>
-    <div class="tracker-list">${trackers.map((tracker) => `<span>✓ ${escapeHtml(tracker)}</span>`).join('')}</div>
+    <div class="technical-title">Known trackers observed</div>
+    <p>These known tracking or advertising domains loaded while the page was open. Compare them with the site's privacy disclosures.</p>
+    <div class="tracker-list">${trackers.map((tracker) => `<span>${escapeHtml(tracker)}</span>`).join('')}</div>
   `;
+}
+
+function renderCookieBreakdown(result) {
+  let box = document.getElementById('cookieBreakdownBox');
+  const breakdown = result.cookie_breakdown;
+
+  if (!breakdown || !breakdown.essential || !breakdown.all_optional) {
+    box?.classList.add('hidden');
+    return;
+  }
+
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'cookieBreakdownBox';
+    box.className = 'finding-card';
+    elements.findings.parentElement.insertBefore(box, elements.findings);
+  }
+
+  const option = (item) => `
+    <div class="finding-meta"><strong>${escapeHtml(item.label || '')}</strong></div>
+    <div class="finding-explanation">${(item.data_collected || []).map((entry) => escapeHtml(entry)).join(', ') || '—'}</div>
+  `;
+
+  box.innerHTML = `<h4 class="finding-title">What each choice means</h4>${option(breakdown.essential)}${option(breakdown.all_optional)}`;
+  box.classList.remove('hidden');
 }
 
 function escapeHtml(value) {
@@ -253,137 +285,17 @@ function escapeHtml(value) {
   }[character]));
 }
 
-function detectLanguage(text) {
-  if (/\u3040-\u30FF/.test(text)) return 'ja';
-  if (/[\uAC00-\uD7AF]/.test(text)) return 'ko';
-  if (/[\u4E00-\u9FFF]/.test(text)) return 'zh';
-  if (/[\u0600-\u06FF]/.test(text)) return 'ar';
-  if (/[\u0590-\u05FF]/.test(text)) return 'he';
-  if (/[\u0370-\u03FF]/.test(text)) return 'el';
-  if (/[\u0900-\u097F]/.test(text)) return 'hi';
-  if (/[\u0E00-\u0E7F]/.test(text)) return 'th';
-  if (/[\u0400-\u04FF]/.test(text)) {
-    if (/[іїєґ]/.test(text)) return 'uk';
-    if (/[ыэё]/.test(text)) return 'ru';
-    return 'bg';
-  }
-  return 'en';
-}
-
-const ERROR_MESSAGES = {
-  bg: 'Възникна грешка при връзката с модела. Моля, опитайте пак.',
-  ru: 'Возникла ошибка при подключении к модели. Попробуйте позже.',
-  uk: 'Виникла помилка під час підключення до моделі. Спробуйте пізніше.',
-  ja: 'モデルへの接続中にエラーが発生しました。後でもう一度試してください。',
-  en: 'An error occurred while connecting to the AI model. Please try again shortly.',
-};
-
-const UI_ERRORS = {
-  bg: {
-    noText: 'Не е намерен четим текст за правен документ на тази страница. Отворете Terms, Conditions, Privacy или Cookies и опитайте отново.',
-    notLegal: 'Изглежда като обикновена уеб страница, а не правен документ. Отворете Terms, Privacy или Cookie Policy страницата и опитайте отново.',
-    backendDown: 'Бекендът е недостъпен. Проверете https://nexuskitty.onrender.com и презаредете разширението.',
-    disabled: 'NexusKitty е изключен за',
-  },
-  en: {
-    noText: 'No readable legal document text found on this page. Open Terms, Conditions, Privacy, or Cookies and try again.',
-    notLegal: 'This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.',
-    backendDown: 'The backend is unavailable. Check https://nexuskitty.onrender.com and reload the extension.',
-    disabled: 'NexusKitty is disabled for',
-  },
-};
-
-function getUiLanguage() {
-  const lang = (navigator.language || 'en').split('-')[0].toLowerCase();
-  if (Object.keys(UI_ERRORS).includes(lang)) return lang;
-  return 'en';
-}
-
-function getUiError(key) {
-  const lang = getUiLanguage();
-  return UI_ERRORS[lang][key] || UI_ERRORS.en[key];
-}
-
-function getErrorMessage(text) {
-  const lang = detectLanguage(text);
-  return ERROR_MESSAGES[lang] || ERROR_MESSAGES.en;
-}
-
 function looksLikeLegalDocument(url, text) {
   const source = `${url} ${text}`.toLowerCase();
   const markers = [
-    // English
     'terms of service', 'terms and conditions', 'terms & conditions',
     'privacy policy', 'cookie policy', 'cookie settings', 'personal data',
     'data processing', 'consent', 'third parties', 'third-party',
-    'data retention', 'arbitration', 'governing law', 'refund policy', 'subscription',
-    // Bulgarian
-    'правила за поверителност', 'политика по поверителност', 'бисквитки',
-    'съгласие', 'лични данни', 'обработка на данни', 'трети страни',
-    'правила и условия', 'арбитраж', 'данъчно задържане', 'абонамент',
-    // Russian
-    'политика конфиденциальности', 'файлы cookie', 'согласие',
-    'личные данные', 'обработка данных', 'третьи стороны',
-    'условия', 'арбитраж', 'подписка', 'договор', ' возврат',
-    // Ukrainian
-    'політика конфіденційності', ' файли cookie', 'згода',
-    'особисті дані', 'обробка даних', 'треті сторони',
-    'умови', 'арбітраж', 'підписка',
-    // German
-    'datenschutz', 'cookies', 'einwilligung', 'nutzungsbedingungen',
-    'vertrag', 'widerruf', 'abonnement',
-    // French
-    'politique de confidentialité', 'cookies', 'consentement',
-    'conditions générales', 'données personnelles', 'abonnement',
-    // Spanish
-    'política de privacidad', 'cookies', 'consentimiento',
-    'términos y condiciones', 'datos personales', 'suscripción',
-    // Italian
-    'politica sulla privacy', 'cookie', 'consenso',
-    'condizioni generali', 'dati personali', 'abbonamento',
-    // Portuguese
-    'política de privacidade', 'cookies', 'consentimento',
-    'condições gerais', 'dados pessoais', 'assinatura',
-    // Dutch
-    'privacybeleid', 'cookies', 'toestemming',
-    'gebruiksvoorwaarden', 'persoonsgegevens', 'abonnement',
-    // Polish
-    'polityka prywatności', 'ciasteczka', 'zgoda',
-    'warunki korzystania', 'dane osobowe', 'abonament',
-    // Czech
-    'zásady ochrany osobních údajů', 'cookies', 'souhlas',
-    'podmínky použití', 'osobní údaje',
-    // Hungarian
-    'adatvédelmi nyilatkozat', 'sütik', 'hozzájárulás',
-    'használati feltételek', 'személyes adatok', 'előfizetés',
-    // Romanian
-    'politica de confidențialitate', 'cookie-uri', 'consimțământ',
-    'condiții generale', 'date personale', 'abonament',
-    // Turkish
-    'kişisel verilerin korunması', 'çerezler', 'onay',
-    'kullanım şartları', 'abone olma',
-    // Greek
-    'πολιτική απορρήου', 'cookie', 'συγκατάθεση',
-    'όροι χρήσης', 'προσωπικά δεδομένα',
-    // Arabic
-    'سياسة الخصوصية', 'ملفات ارتساعية', 'موافقة',
-    'شروط الاستخدام', 'بيانات شخصية',
-    // Japanese
-    'プライバシーポリシー', 'クッキー', '同意', '利用規約', '個人データ',
-    // Korean
-    '개인정보 처리방침', '쿠키', '동의', '이용 약관',
-    // Chinese (Simplified)
-    '隐私政策', 'cookie', '同意', '使用条款', '个人信息',
-    // Hindi
-    'गोपनीयता नीति', 'कूकीज', 'सहमति', 'उपयोग conditions', 'व्यक्तिगत डेटा',
-    // Thai
-    'นโยบายความเป็นส่วนตัว', 'คุกกี้', 'การยินยอม', 'ข้อกำหนดการใช้',
-    // Hebrew
-    'מדיניות פרטיות', 'עוגיות', 'הסכם', 'תנאי שירות',
+    'data retention', 'arbitration', 'governing law', 'refund policy', 'subscription'
   ];
   const matches = markers.filter((marker) => source.includes(marker)).length;
-  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy|политика|бисквитки|съгласие|правила|datenschutz|politique|privacidad|confidențialitate|kişisel|προσωπικά|سياسة|使用|개인|गोपनीयता|ความเป็น|מדיניות)/i.test(url);
-  return legalUrl || matches >= 2;
+  const legalUrl = /(terms|conditions|privacy|cookie|legal|gdpr|data-policy)/i.test(url);
+  return legalUrl || matches >= 3;
 }
 
 async function request(path, options = {}) {
@@ -453,7 +365,7 @@ async function toggleSiteStatus() {
 }
 
 async function initialize() {
-  showLoading('Analyzing Privacy & Cookie Policies...');
+  showLoading();
   try {
     await request('/api/health');
     setStatus(true);
@@ -468,45 +380,33 @@ async function initialize() {
 
       if (disabledDomains.includes(domain)) {
         state.isDisabled = true;
-        showError(`${getUiError('disabled')} ${domain}.`, false, true);
+        showError(`NexusKitty е изключен за ${domain}.`, false, true);
         updateBadgeAlert(false);
         return;
       }
     }
 
-    // Use new async multi-layer extraction (zero-failure)
-    const page = tab?.id ? await getDocumentTextAsync(tab.id) : { text: '', trackers: [], consent_controls: [], legal_surface: false };
+    const page = tab?.id ? await getPageData(tab.id) : { text: '', trackers: [], consent_controls: [], legal_surface: false };
     state.text = page.text || '';
     state.trackers = page.trackers || [];
     state.consentControls = page.consent_controls || [];
     state.legalSurface = page.legal_surface === true;
 
-    // Zero-failure: ALWAYS proceed to analysis, never block on text length
+    if (state.text.trim().length < 30) {
+      showError('No readable legal document text found on this page. Open Terms, Conditions, Privacy, or Cookies and try again.');
+      return;
+    }
+
+    if (!looksLikeLegalDocument(state.url, state.text) && !state.consentControls.length && !state.legalSurface) {
+      showError('This looks like a regular webpage, not a legal document. Open its Terms, Privacy, or Cookie Policy page to analyze it.', true);
+      return;
+    }
+
     await analyzeCurrentPage();
   } catch (error) {
     setStatus(false);
-    showError(getUiError('backendDown'));
+    showError('The local backend is unavailable. Start FastAPI on 127.0.0.1:8000 and reload the extension.');
     console.error('NexusKitty initialization failed:', error);
-  }
-}
-
-async function getDocumentTextAsync(tabId) {
-  try {
-    const result = await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_DOCUMENT_TEXT' });
-    if (result?.ok && result?.text) {
-      // Also get trackers and consent controls from the legacy payload
-      const legacy = await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_PAGE_DATA', force_refresh: true });
-      return {
-        text: result.text,
-        trackers: legacy?.trackers || [],
-        consent_controls: legacy?.consent_controls || [],
-        legal_surface: legacy?.legal_surface || false
-      };
-    }
-    return { text: '', trackers: [], consent_controls: [], legal_surface: false };
-  } catch (error) {
-    console.error('NexusKitty: Async document extraction failed:', error);
-    return { text: '', trackers: [], consent_controls: [], legal_surface: false };
   }
 }
 
@@ -519,7 +419,8 @@ async function analyzeCurrentPage(override = false) {
         url: state.url,
         text: state.text,
         detected_trackers: state.trackers || [],
-        consent_controls: state.consentControls || []
+        consent_controls: state.consentControls || [],
+        language: (navigator.language || 'en').split('-')[0],
       }),
     });
     renderAnalysis(result);
@@ -542,43 +443,34 @@ function switchTab(tabName) {
 async function loadHistory() {
   try {
     const history = await request('/api/history?limit=5');
-    elements.history.innerHTML = history.length ? history.map((item, index) => {
-      const score = Number(item.safety_score) || 0;
-      const label = item.safety_prediction || safetyLabel(score);
-      const riskClass = score >= 65 ? 'safe' : score >= 40 ? 'warning' : 'danger';
-      return `
-      <article class="history-item" data-index="${index}">
-        <div class="history-domain">${escapeHtml(item.domain || 'Unknown domain')}</div>
-        <div class="history-score">
-          <span class="history-score-badge ${riskClass}">${escapeHtml(label)}</span>
-          <span class="history-score-num">${score}/100</span>
-        </div>
-        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 400))}</div>
-      </article>
-      `;
-    }).join('') : '<div class="history-item">No scans yet.</div>';
+    if (!history.length) {
+      elements.history.innerHTML = '<div class="history-item">No scans yet.</div>';
+      return;
+    }
 
-    // Attach click handlers so selecting a history entry shows its analysis
-    // in the main panel, like a promotional sweep through previous scans.
-    elements.history.querySelectorAll('.history-item').forEach((node) => {
-      node.addEventListener('click', () => {
-        const index = Number(node.dataset.index);
-        if (Number.isNaN(index) || !history[index]) return;
-        renderAnalysis(history[index]);
-        switchTab('analysis');
+    state.historyCache = history;
+
+    elements.history.innerHTML = history.map((item, index) => `
+      <article class="history-item" data-history-index="${index}">
+        <div class="history-domain">${escapeHtml(item.domain || 'Unknown domain')}</div>
+        <div class="history-score">${(item.findings || []).length} issue(s) found</div>
+        <div class="history-summary">${escapeHtml((item.summary || '').slice(0, 160))}</div>
+      </article>
+    `).join('');
+
+    elements.history.querySelectorAll('.history-item').forEach((el) => {
+      el.addEventListener('click', () => {
+        const idx = parseInt(el.dataset.historyIndex, 10);
+        const item = state.historyCache?.[idx];
+        if (item) {
+          renderAnalysis(item);
+          switchTab('analysis');
+        }
       });
     });
   } catch (error) {
     elements.history.innerHTML = '<div class="history-item">History is unavailable.</div>';
   }
-}
-
-function safetyLabel(score) {
-  if (score >= 85) return 'Very safe';
-  if (score >= 65) return 'Mostly safe';
-  if (score >= 40) return 'Use with caution';
-  if (score >= 20) return 'Risky';
-  return 'High risk';
 }
 
 function appendChat(role, text) {
@@ -587,13 +479,6 @@ function appendChat(role, text) {
   message.textContent = text;
   elements.chat.appendChild(message);
   elements.chat.scrollTop = elements.chat.scrollHeight;
-
-  // Track chat history for context — keep the full conversation alive
-  // so follow-up questions can reference earlier messages.
-  state.chatHistory.push({
-    sender: role === 'bot' ? 'assistant' : 'user',
-    text,
-  });
 }
 
 function attachEvents() {
@@ -637,17 +522,12 @@ function attachEvents() {
     try {
       const answer = await request('/api/ask', {
         method: 'POST',
-        body: JSON.stringify({
-          url: state.url,
-          question,
-          context_text: state.text,
-          history: state.chatHistory,
-        }),
+        body: JSON.stringify({ url: state.url, question, context_text: state.text }),
       });
       appendChat('bot', answer.answer || 'No answer returned.');
     } catch (error) {
       console.error('Ask Kitty failed:', error);
-      appendChat('bot', getErrorMessage(question));
+      appendChat('bot', 'Kitty could not get an answer. Please try again.');
     } finally {
       elements.send.disabled = false;
     }

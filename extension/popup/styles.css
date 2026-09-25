@@ -620,7 +620,7 @@ button {
 
   position: absolute;
 
-  right: -36px;
+  right: 10px;
   bottom: -8px;
 
   color: rgba(242, 233, 228, 0.06);
@@ -1223,6 +1223,7 @@ button {
 
 .gdpr-button {
   position: relative;
+  display:none;
 
   width: 100%;
 
@@ -1634,7 +1635,7 @@ button {
 }
 
 .history-score-badge {
-  display: inline-block;
+  display: none;
 
   padding: 2px 7px;
 
@@ -1667,6 +1668,7 @@ button {
 }
 
 .history-score-num {
+  display:none;
   color: var(--muted);
 
   font-weight: 500;
@@ -1701,30 +1703,28 @@ button {
 }
 
 .chat-messages {
-  position: relative;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
 
-  display: flex;
-  flex-direction: column;
+    height: 260px;
+    padding: 17px 16px;
+    margin: 0 18px;
 
-  gap: 12px;
+    overflow-y: auto;
+    overflow-x: hidden;
 
-  max-height: 340px;
-  min-height: 150px;
+    background: var(--space-indigo);
+    border: 1px solid var(--dusty-grape);
+    border-radius: 5px;
 
-  margin: 0 18px;
-
-  padding: 17px 16px;
-
-  overflow-y: auto;
-
-  background: var(--space-indigo);
-
-  border: 1px solid var(--space-indigo);
-  border-radius: 5px;
+    /* важно */
+    min-height: 0;
 }
 
 .chat-messages::before {
-  content: "NEXUSKITTY // CORRESPONDENCE";
+  content: "CORRESPONDENCE";
 
   display: block;
 
@@ -1733,7 +1733,7 @@ button {
   color: var(--almond-silk);
 
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 7px;
   font-weight: 700;
 
   letter-spacing: 0.16em;

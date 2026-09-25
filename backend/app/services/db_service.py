@@ -20,6 +20,7 @@ class DBService:
                 # Convert the Supabase record to ToSAnalysisResult
                 record = response.data[0]
                 return ToSAnalysisResult(
+                    url=record.get('url'),
                     domain=record['domain'],
                     safety_score=record['safety_score'],
                     summary=record['summary'],
@@ -30,6 +31,58 @@ class DBService:
             # Log the error and return None (cache miss)
             print(f"Error fetching analysis from Supabase: {e}")
             return None
+
+    async def get_analysis_by_url_and_hash(self, url: str, content_hash: str) -> Optional[ToSAnalysisResult]:
+        """
+        Check if we have a cached analysis for the given URL AND content hash.
+
+        A record with a missing/null content_hash is treated as a cache
+        miss so that old records created before content-hash deduplication
+        existed do not block re-analysis of new content.
+        """
+        try:
+            response = (
+                self.supabase
+                .table('analyses')
+                .select('*')
+                .eq('url', url)
+                .eq('content_hash', content_hash)
+                .execute()
+            )
+            if response.data and len(response.data) > 0:
+                record = response.data[0]
+                return ToSAnalysisResult(
+                    url=record.get('url'),
+                    domain=record['domain'],
+                    safety_score=record['safety_score'],
+                    summary=record['summary'],
+                    findings=record['findings']
+                )
+            return None
+        except Exception as e:
+            print(f"Error fetching analysis by URL+hash from Supabase: {e}")
+            return None
+
+    async def analysis_exists_for_hash(self, url: str, content_hash: str) -> bool:
+        """
+        Check whether an analysis for this URL + content_hash already exists.
+        Used to prevent duplicate history records when the same page
+        content is re-analyzed (e.g. after iframe consent relay).
+        """
+        try:
+            response = (
+                self.supabase
+                .table('analyses')
+                .select('id')
+                .eq('url', url)
+                .eq('content_hash', content_hash)
+                .limit(1)
+                .execute()
+            )
+            return bool(response.data and len(response.data) > 0)
+        except Exception as e:
+            print(f"Error checking content hash dedup: {e}")
+            return False
 
     async def get_analysis_by_domain(self, domain: str) -> Optional[ToSAnalysisResult]:
         """
@@ -51,7 +104,7 @@ class DBService:
             print(f"Error fetching analysis from Supabase: {e}")
             return None
 
-    async def save_analysis(self, url: str, domain: str, title: Optional[str], analysis_result: ToSAnalysisResult) -> Optional[str]:
+    async def save_analysis(self, url: str, domain: str, title: Optional[str], analysis_result: ToSAnalysisResult, content_hash: Optional[str] = None) -> Optional[str]:
         """
         Save the analysis result to Supabase and return the record ID.
         If RLS blocks writes, return None instead of crashing the endpoint.
@@ -64,6 +117,8 @@ class DBService:
             "summary": analysis_result.summary,
             "findings": analysis_result.findings.model_dump() if hasattr(analysis_result.findings, 'model_dump') else [f.model_dump() for f in analysis_result.findings],
         }
+        if content_hash:
+            data["content_hash"] = content_hash
         prediction = getattr(analysis_result, "safety_prediction", None)
         if prediction:
             data["safety_prediction"] = prediction
@@ -96,6 +151,7 @@ class DBService:
             results = []
             for record in response.data:
                 results.append(ToSAnalysisResult(
+                    url=record.get('url'),
                     domain=record['domain'],
                     safety_score=record.get('safety_score', 0),
                     safety_prediction=record.get('safety_prediction') or safety_prediction_label(record.get('safety_score', 0)),

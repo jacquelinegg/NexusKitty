@@ -57,6 +57,7 @@ class SemanticDiff(BaseModel):
 
 
 class ToSAnalysisResult(BaseModel):
+    url: Optional[str] = None
     domain: str
     # Deterministic safety prediction (0-100). Higher = safer.
     # Computed by deterministic_safety_score() from text markers, LLM
