@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import hashlib
+import os
 import re
 from difflib import SequenceMatcher
 from urllib.parse import urlparse
@@ -1013,8 +1014,14 @@ async def root():
 # ============================================================
 @app.get("/api/health")
 async def health_check():
+    # Render injects RENDER_GIT_COMMIT into every build, so this endpoint is
+    # the only reliable way to tell WHICH build is actually serving traffic.
+    # "local" means the process is not running on Render, or was started
+    # without Render's build metadata.
     return {
-        "status": "ok"
+        "status": "ok",
+        "version": settings.VERSION,
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "local"),
     }
 
 
