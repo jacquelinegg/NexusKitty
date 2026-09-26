@@ -1965,7 +1965,17 @@ async function handleMessage(request, sender, sendResponse) {
       sendResponse({ ok: true, chars: (text || '').length });
       return;
     }
-    if (request && request.type === 'NEXUSKITTY_GET_PAGE_DATA') { const payload = await buildPagePayload(request.force_refresh === true); sendResponse({ ok: true, ...payload }); return; }
+    if (request && request.type === 'NEXUSKITTY_GET_PAGE_DATA') {
+      // The content script runs in every frame, and the popup now addresses the
+      // top frame explicitly (frameId: 0). A subframe has no legal document to
+      // find and no business answering a page-data request: it would return the
+      // "no text" fallback and, if it ever won the race, convince the popup that
+      // a perfectly readable page was empty.
+      if (window.top !== window.self) { sendResponse({ ok: false, subframe: true, text: '', analysis_text: '' }); return; }
+      const payload = await buildPagePayload(request.force_refresh === true);
+      sendResponse({ ok: true, ...payload });
+      return;
+    }
     if (request && request.type === 'NEXUSKITTY_GET_DOCUMENT_TEXT') {
       const result = await extractDocumentTextAsync();
       const trackers = detectTrackers(); const consentControls = getConsentSnapshot(); const legalSurface = hasLegalSurface();

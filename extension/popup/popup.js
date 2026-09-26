@@ -243,11 +243,18 @@ function renderAnalysis(result) {
   }
 
   if (state.tabId) {
-    chrome.tabs.sendMessage(state.tabId, {
-      type: 'NEXUSKITTY_ANALYSIS_RESULT',
-      categories: findings.map((finding) => finding.category),
-      should_warn: Boolean(alert?.detected || highRiskCount >= 2 || (result.detected_trackers || []).length >= 3),
-    }).catch(() => {});
+    // frameId: 0 for the same reason as requestPageData: the risk banner is
+    // about the document the user is reading, and a subframe rendering its own
+    // consent UI would otherwise also draw one.
+    chrome.tabs.sendMessage(
+      state.tabId,
+      {
+        type: 'NEXUSKITTY_ANALYSIS_RESULT',
+        categories: findings.map((finding) => finding.category),
+        should_warn: Boolean(alert?.detected || highRiskCount >= 2 || (result.detected_trackers || []).length >= 3),
+      },
+      { frameId: 0 }
+    ).catch(() => {});
   }
 
   showAnalysis();
@@ -434,9 +441,21 @@ function popupLog(stage, detail) {
 // used to abort getPageData(), which returned an empty object, and the popup
 // reported "No readable legal document text found" on a page that was perfectly
 // analysable - the user had to hit refresh in devtools to make it work.
+//
+// frameId: 0 is not an optimisation, it is the whole point. The content script
+// is registered with all_frames: true, so a message without a frameId goes to
+// EVERY frame in the tab and the first response wins. The top frame is busy for
+// 40s fetching and rendering the legal pages, while any ad frame, cookiebot
+// iframe or tracking pixel answers immediately with its own "no text" fallback.
+// The popup therefore polled for 40 seconds and never once saw the real payload,
+// while the background log showed three documents rendered and translated.
 async function requestPageData(tabId) {
   try {
-    return await chrome.tabs.sendMessage(tabId, { type: 'NEXUSKITTY_GET_PAGE_DATA', force_refresh: true });
+    return await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'NEXUSKITTY_GET_PAGE_DATA', force_refresh: true },
+      { frameId: 0 }
+    );
   } catch (error) {
     popupLog('page-data request failed', error?.message || String(error));
     return null;
@@ -448,7 +467,9 @@ async function requestPageData(tabId) {
 // and the existing instance keeps answering, so polling succeeds either way.
 async function ensureContentScript(tabId) {
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['scripts/content.js'] });
+    // allFrames defaults to false, so this is the top frame only - the one the
+    // popup polls, and the only one whose document is the page under analysis.
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ['scripts/content.js'] });
     return true;
   } catch (error) {
     return false;
