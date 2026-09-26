@@ -1,0 +1,46 @@
+# Render blueprint for the NexusKitty backend.
+#
+# The service is already live at https://nexuskitty.onrender.com. This file
+# makes its build reproducible and reviewable: the previous setup lived only in
+# the Render dashboard, where the build command and the Python version are easy
+# to lose.
+#
+# Applying it (Render dashboard -> Blueprints, or "New -> Blueprint"):
+#   1. Point it at this repository and master.
+#   2. Fill in every `sync: false` variable below in the Render dashboard.
+#      EXTENSION_API_KEY must match extension/popup/config.js exactly, otherwise
+#      every /api/* call from the extension is rejected with 401.
+#   3. Deploy. The health check below is what Render polls.
+services:
+  - type: web
+    name: nexuskitty-api
+    runtime: python
+    pythonVersion: "3.11.9"
+    plan: free
+    rootDir: backend
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Supabase - the app writes scan history here and falls back to an
+      # in-memory cache when Supabase is unreachable.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # LLM providers
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      # Shared secret between the extension and the backend. Rotating it means
+      # rotating it in both places and re-running scripts/sync_extension_config.py.
+      - key: EXTENSION_API_KEY
+        sync: false

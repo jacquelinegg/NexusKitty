@@ -126,9 +126,26 @@ The extension supports switching between a local development backend and the pro
    ```bash
    git add .
    git commit -m "Your deployment message"
-   git push origin main
+   git push origin master
    ```
    Render auto-detects the push and deploys within 1–2 minutes.
+
+   The service is declared in [`render.yaml`](render.yaml): Python 3.11, root
+   directory `backend`, `pip install -r requirements.txt`, and
+   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Every secret
+   (`SUPABASE_*`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `EXTENSION_API_KEY`) is
+   `sync: false` and lives only in the Render dashboard.
+
+   > `backend/requirements.txt` lists only what `app/` imports. Do not replace
+   > it with a `pip freeze` of a local virtualenv: the previous freeze pulled in
+   > torch, tensorflow, streamlit and friends, none of which are used, and the
+   > Windows-resolved pins either take many minutes to build on Linux or fail.
+
+   > `EXTENSION_API_KEY` must match `extension/popup/config.js` exactly. After
+   > changing it on Render, re-run
+   > `python scripts/sync_extension_config.py` and reload the unpacked extension.
+   > The key that was committed before `config.js` was git-ignored is public in
+   > the git history of this repository and should be treated as compromised.
 
 > **Note:** On Render's free tier, the instance spins down after ~15 minutes of inactivity. The first request after idle will take 30–50 seconds (cold start) to wake the server. To disable auto-deploy and use manual deploys instead, toggle **Auto-Deploy** to **Off** in your Render service Settings.
 
