@@ -81,10 +81,18 @@ class ToSAnalysisResult(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     url: str
+    # The document in its ORIGINAL language. Every `evidence` quote the model
+    # returns is copied from this field, so it must never be the translation.
     text: str
     detected_trackers: List[str] = Field(default_factory=list)
     consent_controls: List[dict] = Field(default_factory=list)
     language: str = "en"  # browser language code, e.g. "bg"
+    # Optional English rendering produced by the extension, attached so the
+    # model can reason in English without losing the original wording.
+    translated_text: Optional[str] = None
+    # Language the document itself is written in, e.g. "de". Used only to tell
+    # the model which language the quotes are expected to be in.
+    detected_language: Optional[str] = None
 
 
 class AskRequest(BaseModel):

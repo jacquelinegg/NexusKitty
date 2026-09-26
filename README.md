@@ -71,12 +71,19 @@ nexus-kitty/
 
 ### Extension
 
-1. Load the extension in Chrome:
+1. Sync the extension config with your backend `.env` (generates `extension/popup/config.js`, which carries `API_BASE` and `EXTENSION_API_KEY`):
+   ```bash
+   python scripts/sync_extension_config.py
+   ```
+
+2. Load the extension in Chrome:
    - Open Chrome and go to `chrome://extensions`
    - Enable "Developer mode"
    - Click "Load unpacked" and select the `extension` directory
 
-2. Visit a Terms of Service or Privacy Policy page, then click the NexusKitty extension icon to see the analysis.
+3. Visit a Terms of Service or Privacy Policy page, then click the NexusKitty extension icon to see the analysis.
+
+> `EXTENSION_API_KEY` in `config.js` must match the one in `backend/.env`, or every request returns 401. Re-run the sync script whenever you change it.
 
 ## Usage
 

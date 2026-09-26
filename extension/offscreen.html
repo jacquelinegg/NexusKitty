@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>NexusKitty off-screen renderer</title>
+  </head>
+  <body>
+    <!--
+      This document is never shown: it exists only as a hidden browsing
+      context (chrome.offscreen) whose single iframe renders JavaScript-heavy
+      legal pages. The iframe's content script reports its rendered text back
+      to the service worker, so no visible tab is ever needed.
+    -->
+    <div id="nk-render-host"></div>
+    <script src="scripts/offscreen.js"></script>
+  </body>
+</html>

@@ -840,6 +840,25 @@ button {
 
 
 /* =========================================================
+   SURROUNDING-PAGE FALLBACK WARNING
+   ========================================================= */
+
+.fallback-warning {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.45);
+  border-radius: 4px;
+
+  color: rgb(171 156 112 / 95%);
+
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+
+/* =========================================================
    SUMMARY
    ========================================================= */
 

@@ -111,9 +111,52 @@ class LLMService:
     # Groq (synchronous SDK calls; always run through asyncio.to_thread)
     # ------------------------------------------------------------------
 
-    def _analyze_with_groq(self, text: str, language: str = "en") -> ToSAnalysisResult:
+    def _build_analyze_user_content(
+        self,
+        text: str,
+        language: str,
+        translated_text: str = None,
+        detected_language: str = None,
+    ) -> str:
+        """Assemble the user turn for an analysis request.
+
+        FIX: the extension used to send ONLY its machine translation, so the
+        model had no choice but to quote the English rendering - even though
+        both the prompt and the schema demand "EXACT verbatim quote ... in the
+        document's original language". Now the ORIGINAL text is the document
+        (that is what gets quoted) and the translation is attached separately
+        as an aid for reasoning in English.
+        """
+        parts = [f"OUTPUT LANGUAGE: {language}"]
+
+        if detected_language:
+            parts.append(f"DOCUMENT LANGUAGE (detected): {detected_language}")
+
+        parts.append(
+            "DOCUMENT (ORIGINAL LANGUAGE - this is the authoritative text; "
+            "copy every `evidence` quote from it verbatim, never from a "
+            "translation):\n" + text
+        )
+
+        if translated_text and translated_text.strip() and translated_text.strip() != text.strip():
+            parts.append(
+                "ENGLISH TRANSLATION (for understanding only - never quote from "
+                "it, never copy wording from it):\n" + translated_text
+            )
+
+        return "\n\n".join(parts)
+
+    def _analyze_with_groq(
+        self,
+        text: str,
+        language: str = "en",
+        translated_text: str = None,
+        detected_language: str = None,
+    ) -> ToSAnalysisResult:
         extra = {"reasoning_effort": GROQ_REASONING_EFFORT}
-        user_content = f"OUTPUT LANGUAGE: {language}\n\n{text}"
+        user_content = self._build_analyze_user_content(
+            text, language, translated_text, detected_language
+        )
 
         # 1) Structured output (needs json_schema support on the model)
         try:
@@ -191,13 +234,21 @@ class LLMService:
     # Gemini (synchronous SDK calls; always run through asyncio.to_thread)
     # ------------------------------------------------------------------
 
-    def _analyze_with_gemini(self, text: str, language: str = "en") -> Optional[ToSAnalysisResult]:
+    def _analyze_with_gemini(
+        self,
+        text: str,
+        language: str = "en",
+        translated_text: str = None,
+        detected_language: str = None,
+    ) -> Optional[ToSAnalysisResult]:
         if not self.gemini_client or not types:
             return None
         try:
             response = self.gemini_client.models.generate_content(
                 model=self.gemini_model,
-                contents=f"OUTPUT LANGUAGE: {language}\n\n{text}",
+                contents=self._build_analyze_user_content(
+                    text, language, translated_text, detected_language
+                ),
                 config=types.GenerateContentConfig(
                     system_instruction=TOS_ANALYSIS_SYSTEM_PROMPT,
                     response_mime_type="application/json",
@@ -448,16 +499,26 @@ class LLMService:
     # Public async API  (order: Groq -> Gemini -> local fallback)
     # ------------------------------------------------------------------
 
-    async def analyze_tos(self, text: str, language: str = "en") -> ToSAnalysisResult:
+    async def analyze_tos(
+        self,
+        text: str,
+        language: str = "en",
+        translated_text: str = None,
+        detected_language: str = None,
+    ) -> ToSAnalysisResult:
         reason = "providers_unavailable"
 
         try:
-            return await asyncio.to_thread(self._analyze_with_groq, text, language)
+            return await asyncio.to_thread(
+                self._analyze_with_groq, text, language, translated_text, detected_language
+            )
         except Exception as e:
             reason = self._error_kind(e)
             logger.warning("Groq analysis failed (%s): %s", reason, str(e)[:500])
 
-        gemini_result = await asyncio.to_thread(self._analyze_with_gemini, text, language)
+        gemini_result = await asyncio.to_thread(
+            self._analyze_with_gemini, text, language, translated_text, detected_language
+        )
         if gemini_result:
             return gemini_result
 

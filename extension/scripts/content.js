@@ -32,8 +32,63 @@ function stripJunkNoise(text) {
   return t.replace(/\s+/g, ' ').trim();
 }
 
-const MAX_TEXT_LENGTH = 9000;
+// Per-document extraction cap. 9000 characters was cutting long privacy
+// declarations (betano's is ~31k) before the translator even saw them, so the
+// model reasoned about a fragment. The combined set is bounded separately by
+// the translation budget, which now spreads itself across every document.
+const MAX_TEXT_LENGTH = 20000;
 const MAX_LEGAL_LINKS = 12;
+
+// How the final analysis text is split between the three kinds of source. The
+// deep scan gets the most because it holds the actual policy documents; the
+// banner and the current page are supporting evidence.
+const CONSENT_BANNER_CHARS = 4000;
+const MAIN_DOC_CHARS = 6000;
+const DEEP_SCAN_CHARS = 18000;
+const COMBINED_TEXT_CAP = 30000;
+
+// Take `budget` characters out of a multi-document text, spreading them over the
+// [SOURCE: ...] blocks proportionally and sampling each block evenly (opening,
+// middle, closing) instead of cutting a prefix. Documents about consent,
+// retention and liability put their obligations in different halves, so a
+// prefix-only cut is exactly the wrong sample.
+function sampleSourcesProportionally(text, budget) {
+  const source = String(text || '');
+  if (source.length <= budget) return source;
+
+  const blocks = source.split(/(?=\[SOURCE:)/).map((b) => b.trim()).filter(Boolean);
+  if (blocks.length <= 1) return sampleEvenly(source, budget);
+
+  const total = blocks.reduce((sum, b) => sum + b.length, 0);
+  let shares = blocks.map((b) => Math.max(600, Math.floor((budget * b.length) / total)));
+  const shareSum = shares.reduce((a, b) => a + b, 0);
+  if (shareSum > budget) {
+    const factor = budget / shareSum;
+    shares = shares.map((s) => Math.max(200, Math.floor(s * factor)));
+  }
+
+  console.log(
+    'NexusKitty [DIAG]: deep-scan budget', budget, 'over', blocks.length,
+    'documents (chars/share):', blocks.map((b, i) => `${b.length}/${shares[i]}`).join(', ')
+  );
+  return blocks.map((b, i) => sampleEvenly(b, shares[i])).join('\n\n');
+}
+
+function sampleEvenly(text, budget) {
+  if (!text || text.length <= budget) return text || '';
+  const slices = 4;
+  const first = Math.max(200, Math.floor(budget / slices));
+  const rest = text.slice(first);
+  // The remaining slices share what is left of the budget, otherwise the four
+  // slices together return 1.25x the requested size.
+  const restLength = Math.max(200, Math.floor((budget - first) / (slices - 1)));
+  const parts = [text.slice(0, first)];
+  for (let i = 0; i < slices - 1; i += 1) {
+    const offset = Math.floor((rest.length * i) / (slices - 1));
+    parts.push(rest.slice(offset, offset + restLength));
+  }
+  return parts.join('\n[...]\n');
+}
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 const HUD_UPDATE_DELAY = 350;
 const BANNER_BUDGET = 3000;
@@ -56,6 +111,51 @@ const NO_CONTENT_FALLBACK_PREFIX = 'Legal analysis fallback for site: ';
 // popup session.
 const fetchedLegalPageCache = new Map();
 const FETCHED_PAGE_CACHE_TTL = 20000; // 20s comfortably covers one popup session
+
+// Why the last fetch of a given URL produced no usable text. Without this the
+// caller cannot tell "the page is client-side rendered" (big HTML, empty body -
+// nothing a fetch can fix) from "the server sent a PDF", "the server returned
+// 403", or "the body was a JS bundle" - and a single message claiming
+// "rendered by JavaScript" would be wrong in most of those cases.
+const FETCH_REASON_HTTP = 'http_error';
+const FETCH_REASON_CONTENT_TYPE = 'content_type';
+const FETCH_REASON_QUOTA = 'quota_page';
+const FETCH_REASON_JS_RENDERED = 'js_rendered';
+const FETCH_REASON_THIN = 'too_thin';
+const FETCH_REASON_SOURCE = 'source_code';
+const fetchedPageFailureReasons = new Map();
+
+// URLs for which we already paid the cost of opening an inactive tab to read
+// the hydrated DOM. This is a TIMESTAMPED cooldown, not a permanent set: a
+// permanent "never again" mark meant one transient failure (or one popup open
+// before the user even saw the result) locked that URL out for the whole life
+// of the content script, i.e. until a manual page reload. The cooldown is far
+// longer than popup.js's ~2s polling window, so ticks still cannot spawn a tab
+// storm, while a later popup open can retry.
+const RENDER_RETRY_COOLDOWN_MS = 90000;
+const renderedFetchAttemptedAt = new Map();
+// Rendered text is stable (it is a policy document, not live page state) and
+// expensive to re-acquire, so it outlives the 20s static-fetch cache. It must
+// stay longer than RENDER_RETRY_COOLDOWN_MS, otherwise the two limits open a
+// gap where the result is neither cached nor re-obtainable.
+const RENDERED_PAGE_CACHE_TTL = 5 * 60 * 1000;
+
+// FIX: extractMainText() ends with a last-resort fallback that returns the
+// RAW text of whatever page the user happens to be on. On a non-legal page
+// whose linked policy could not be extracted (e.g. a client-side-rendered
+// consent-settings page whose static HTML is just a loading template), that
+// silently ships the surrounding marketing copy to the LLM, which then
+// "analyzes" an ad and reports 0 findings. Track whether the last pass
+// degraded to that fallback so the popup can warn instead of pretending the
+// analysis is about the policy.
+let lastExtractionUsedSurroundingPage = false;
+
+// FIX: set when legal URLs were discovered but every fetched body was empty,
+// which almost always means the policy text is client-side rendered (CSR).
+// A plain fetch() from the service worker cannot execute JS, so the real
+// text is unreachable from the background context; the popup uses this flag
+// to explain that instead of showing a false "0 issues" result.
+let lastExtractionJsRenderedSuspect = false;
 
 // FIX: same problem existed for translateTextToEnglish() — it had NO
 // caching at all, so every one of popup.js's up-to-6 force_refresh polling
@@ -276,7 +376,12 @@ const CMP_OVERLAY_SELECTOR_STRING = CMP_OVERLAY_SELECTORS.join(', ');
 function isTechnicalCmpIframe() {
   const href = window.location.href.toLowerCase();
   const host = window.location.hostname.toLowerCase();
-  if (window.self !== window.top) {
+if (getRenderFrameToken()) {
+  // Render target inside the off-screen host: it only has to answer the
+  // extract request. Skipping the normal init keeps the frame from doing a
+  // full page extraction, writing to storage, or relaying consent text.
+  console.log('[NEXUSKITTY] Off-screen render frame ready', location.href);
+} else if (window.self !== window.top) {
     if (/consentcdn\.cookiebot\.eu|blockmarktech\.com|iasme|trusted-shops/i.test(href)) return true;
     if (/recaptcha/i.test(href) && !/consensu|quantcast|cmp/i.test(href)) return true;
     if (host.includes('recaptcha') || host.includes('blockmarktech')) return true;
@@ -301,7 +406,23 @@ function getNodeText(node) {
   if (node.nodeType === Node.TEXT_NODE) return stripJunkNoise(cleanText(node.textContent));
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
   if (typeof node.innerText === 'string' && node.innerText.trim().length > 0) return stripJunkNoise(cleanText(node.innerText));
-  return stripJunkNoise(cleanText(node.textContent || ''));
+  // FIX: innerText is empty for hidden consent widgets, so this path used
+  // node.textContent - which INCLUDES <script> bodies. That is how a Gemius/
+  // CMP tracking snippet (localStorage.gstorage, msgreceiver, postMessage,
+  // ...) leaked into the "consent text" and was shipped to the LLM as if it
+  // were a policy clause. Strip the non-prose tags on a detached clone, but
+  // only when the subtree actually contains one (getConsentContainers() runs
+  // this over every matching node, so the clone must stay conditional).
+  let source = node;
+  try {
+    if (node.querySelector('script, style, noscript, template, svg')) {
+      source = node.cloneNode(true);
+      source.querySelectorAll('script, style, noscript, template, svg').forEach((el) => el.remove());
+    }
+  } catch (e) {
+    source = node;
+  }
+  return stripJunkNoise(cleanText(source.textContent || ''));
 }
 function getTextExcludingOverlays(root) {
   if (!root) return '';
@@ -437,11 +558,19 @@ function hasLegalSurface() {
   if (LEGAL_URL_REGEX.test(window.location.href)) return true;
   return getConsentContainers().length > 0;
 }
+// Tracking parameters that ride along on every link of a shop or a campaign.
+// They never change the document, but they multiply cache entries and make the
+// render tab request absurdly long URLs (yami.com alone appends 9 of them).
+const TRACKING_PARAM_RE = /^(utm_|ga_|gclid|fbclid|msclkid|yclid|ttclid|igshid|mc_|_ga|ref|referer|referrer|aff|affiliate|track|tracking|scene|module|module_name|content|pg|index|rank|rank_id|bu_type|spm|spm_id|from|from_?page|share|share_id|source|src|sessionid|session_id|sid|click(_?id)?|cmp|campaign|ad(_?id)?|at_medium|at_campaign|at_custom\d|wt_mc|piwik|cid|trk|trkCampaign|scm|sc_campaign|sc_channel|sc_content|sc_medium)$/i;
 function normalizeLegalUrl(url) {
   try {
     const parsed = new URL(url); parsed.hash = '';
     let path = parsed.pathname; if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
-    parsed.pathname = path; return parsed.origin + parsed.pathname + parsed.search;
+    parsed.pathname = path;
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (TRACKING_PARAM_RE.test(key)) parsed.searchParams.delete(key);
+    }
+    return parsed.origin + parsed.pathname + parsed.search;
   } catch { return url.split('#')[0].replace(/\/$/, ''); }
 }
 async function readDomainLegalCache(origin) {
@@ -497,16 +626,71 @@ async function discoverDomainLegalLinks() {
     return [];
   }
 }
-function scoreLegalImportance(href, text) {
+// Shops bury legal-looking words in product names. A yami.com bestseller is
+// "/us/en/p/thin-and-crispy-sandwich-cookies-rich-black-sesame-flavor/...":
+// "cookies" in the middle of the slug used to score +10 for the cookie rule and
+// every one of those product pages was then fetched, rendered and translated.
+// So the href is scored from its LAST NON-NUMERIC path segment only, which is
+// where policies keep their name: /statiya/pravila-i-usloviya/339282/ is scored
+// from "pravila-i-usloviya", not from the article id. The visible link text is
+// still trusted, because a link labelled "Privacy policy" is one whatever it
+// points at.
+function hrefTailSegment(href) {
+  try {
+    const segments = new URL(href).pathname.split('/').filter(Boolean);
+    const meaningful = [...segments].reverse().find((segment) => !/^\d[\w-]*$/i.test(segment));
+    return (meaningful || segments[segments.length - 1] || '').toLowerCase();
+  } catch { return ''; }
+}
+// Commerce and catalogue URLs are never policy documents, whatever they contain.
+// The segments are checked as whole path segments, so "/statiya/pravila-i-usloviya/"
+// is unaffected while "/us/en/p/thin-and-crispy-.../1016533491" is vetoed by "/p/".
+// The veto is applied by the scorer only when nothing legal was recognised, so
+// a site that really keeps its policy under "/p/..." and links it as
+// "Privacy policy" still wins on the visible text.
+const COMMERCE_PATH_RE = /\/(p|dp|gp|itm|prd|prod|product|products|item|items|goods|shop|store|catalog|catalogue|collection|collections|category|categories|search|listing|listings|deals|browse|pdp)(\/|$)/i;
+const COMMERCE_PARAM_RE = /^(productid|itemid|goodsid|product_id|item_id|spu|sku|variantid|offerid|catalogueid)$/i;
+function isCommerceUrl(href) {
+  try {
+    const parsed = new URL(href);
+    if (COMMERCE_PATH_RE.test(parsed.pathname)) return true;
+    for (const key of parsed.searchParams.keys()) {
+      if (COMMERCE_PARAM_RE.test(key)) return true;
+    }
+    // "/small-flower-cookie-12-35-oz/1016233601" has no commerce segment, but a
+    // long kebab slug parent followed by a numeric id is a product address.
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length >= 2) {
+      const parent = segments[segments.length - 2];
+      const last = segments[segments.length - 1];
+      if (/\d{3,}/.test(last) && parent.split('-').length >= 4) return true;
+    }
+    return false;
+  } catch { return false; }
+}
+// Latin transliterations matter as much as the Cyrillic words: policy slugs on
+// Bulgarian and Serbian sites are usually romanised ("bonus-pravila",
+// "deklaratsiya-za-poveritelnost") and scored 0 without them.
+function legalTermScore(lowerText) {
   let score = 0;
-  const combined = `${href} ${text}`.toLowerCase();
-  if (/privacy|datenschutz|personal-data|лични данни|поверителност/i.test(combined)) score += 10;
-  if (/cookie|biskvitki|consent|съгласие/i.test(combined)) score += 10;
-  if (/terms|conditions|usloviya|условия/i.test(combined)) score += 8;
-  if (/policy|politika|политика/i.test(combined)) score += 5;
-  if (/legal|gdpr|declaration/i.test(combined)) score += 4;
-  if (/iasme|certificate|recaptcha|blockmarktech|trusted-shops|quota limits|exceeding recaptcha/i.test(combined)) score -= 100;
-  if (/cookieyes\.com|onetrust\.com|cookiebot\.com|quantcast\.com/i.test(combined) && !combined.includes(window.location.hostname)) score -= 100;
+  if (/privacy|privatnost|povertyatelnost|poveritelnost|datenschutz|personal-data|лични данни|поверителност/i.test(lowerText)) score += 10;
+  if (/cookie|biskvitki?|consent|съгласие|saglasie|согласие/i.test(lowerText)) score += 10;
+  if (/terms|conditions|usloviya|uslovia|uslovi|uvjeti|условия|условия/i.test(lowerText)) score += 8;
+  if (/policy|politika|pravila|polityka|политика|правила/i.test(lowerText)) score += 5;
+  if (/legal|gdpr|declaration|deklarac|deklarat|izjava|statement|деклараци|изјава/i.test(lowerText)) score += 4;
+  if (/dost[ae]?p?nost|availability|достъпност|доступност|accessibility/i.test(lowerText)) score += 5;
+  return score;
+}
+function scoreLegalImportance(href, text) {
+  const scoreFromTail = legalTermScore(hrefTailSegment(href));
+  const scoreFromLabel = legalTermScore((text || '').toLowerCase());
+  let score = scoreFromTail + scoreFromLabel;
+  if (/iasme|certificate|recaptcha|blockmarktech|trusted-shops|quota limits|exceeding recaptcha/i.test(href)) score -= 100;
+  if (/cookieyes\.com|onetrust\.com|cookiebot\.com|quantcast\.com/i.test(href) && !href.includes(window.location.hostname)) score -= 100;
+  // The legal word came only from the address, and the address is a shop: a
+  // product page that happens to contain "cookies" or "terms" in its name. The
+  // visible link text still wins, so a real policy under "/p/..." is kept.
+  if (scoreFromLabel === 0 && isCommerceUrl(href)) return -100;
   return score;
 }
 function findLegalLinks() {
@@ -551,6 +735,185 @@ function looksLikeSourceCodeNotProse(text) {
   // but it will not contain dozens of JS syntax tokens per 1000 chars.
   return hits >= 6 && hits / Math.max(text.length, 1) > 0.002;
 }
+// FIX: frameworks that hydrate client-side frequently embed the page's real
+// text as JSON inside a <script> tag, which the usual
+// script/style/nav/header/footer removal throws away. Recover prose from the
+// three shapes that matter:
+//
+//   1. <script id="__NEXT_DATA__" type="application/json">{...}</script>
+//   2. self.__next_f.push([1,"...escaped RSC chunk..."])  (Next.js App Router)
+//   3. window.__NUXT__ = {...} / __NUXT__ = {...}          (Nuxt)
+//
+// Only long, prose-shaped string values are kept, and the result is rejected
+// if it reads like source code, so a JS bundle payload cannot be mistaken for
+// policy text.
+function stripTagsFromMarkup(value) {
+  return String(value)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'");
+}
+
+function collectProseStrings(value, out, depth = 0) {
+  if (depth > 12 || out.length > 400) return;
+  if (typeof value === 'string') {
+    if (value.length >= 200 && /\s/.test(value)) out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectProseStrings(item, out, depth + 1);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const key of Object.keys(value)) collectProseStrings(value[key], out, depth + 1);
+  }
+}
+
+// The recovered text is not clean prose: RSC/JSON scaffolding tokens like
+// ["$","article"...] , "children":, null, "pageProps": survive the tag strip
+// and would reach the LLM as garbage. Drop structural tokens that only ever
+// appear as JSON keys/refs, without touching real sentences.
+function stripPayloadScaffolding(text) {
+  return String(text)
+    .replace(/\[\s*"\$"\s*,?/g, ' ')
+    .replace(/"\$"\s*,?/g, ' ')
+    .replace(/"(?:children|pageProps|props|type|key|href|ref|html|content|body)"\s*:\s*/g, ' ')
+    .replace(/\b(?:null|undefined|true|false)\b(?=\s*[,}\]])/g, ' ')
+    .replace(/(^|\s)\d+:(?=\s)/g, '$1')
+    .replace(/\s*[\]}]{2,}\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function extractEmbeddedPayloadProse(doc) {
+  const collected = [];
+
+  for (const script of doc.querySelectorAll('script')) {
+    const source = script.textContent || '';
+    if (!source) continue;
+
+    // 1. Plain JSON island: __NEXT_DATA__, __NUXT__, or any application/json.
+    if (script.getAttribute('type') === 'application/json' || /__NEXT_DATA__|__NUXT__/.test(source)) {
+      const jsonSource = source.replace(/^\s*window\.__NUXT__\s*=\s*/, '').replace(/;\s*$/, '');
+      try {
+        collectProseStrings(JSON.parse(jsonSource), collected);
+        continue;
+      } catch (e) {
+        // fall through to the string-literal scan below
+      }
+    }
+
+    // 2/3. Streaming pushes and object literals: pull out every JSON string
+    // literal, unescape it, and keep the ones that look like prose.
+    if (/__next_f\.push|__NUXT__|__PRELOADED_STATE__|__INITIAL_STATE__/.test(source)) {
+      const literalPattern = /"((?:[^"\\]|\\.)*)"/g;
+      let match;
+      while ((match = literalPattern.exec(source)) !== null) {
+        let decoded;
+        try {
+          decoded = JSON.parse(`"${match[1]}"`);
+        } catch (e) {
+          continue;
+        }
+        if (decoded.length >= 200 && /\s/.test(decoded)) collected.push(decoded);
+      }
+      try {
+        collectProseStrings(JSON.parse(source.replace(/^\s*window\.__NUXT__\s*=\s*/, '')), collected);
+      } catch (e) {}
+    }
+  }
+
+  if (collected.length === 0) return '';
+
+  const merged = stripJunkNoise(cleanText(stripTagsFromMarkup(stripPayloadScaffolding(collected.join(' '))))).slice(0, MAX_TEXT_LENGTH);
+  if (!merged || merged.length < 200) return '';
+  if (looksLikeSourceCodeNotProse(merged)) {
+    console.log('NexusKitty [FILTER]: embedded payload looks like source code, ignoring it');
+    return '';
+  }
+  return merged;
+}
+
+// Open the URL in an inactive tab, let JavaScript hydrate, and read the
+// resulting DOM. This is the only way to read a client-side-rendered policy
+// (betano.bg, learngerman.dw.com and similar SPAs ship an empty app shell to
+// a plain fetch). Returns the cleaned text on success, or null.
+//
+// Called from two places, both of which the previous inline version missed:
+//   - the static HTML parsed down to almost nothing (CSR app shell)
+//   - the static fetch never returned a body at all (aborted by the 6s
+//     timeout, which is what happens on slow non-cached legal pages)
+async function attemptRenderedFetch(url, cacheKey, triggerReason) {
+  const lastAttempt = renderedFetchAttemptedAt.get(cacheKey) || 0;
+  if (Date.now() - lastAttempt < RENDER_RETRY_COOLDOWN_MS) {
+    console.log('NexusKitty [RENDER]: skipping, already tried', Math.round((Date.now() - lastAttempt) / 1000), 's ago');
+    return null;
+  }
+
+  renderedFetchAttemptedAt.set(cacheKey, Date.now());
+  console.log('NexusKitty [RENDER]: requesting an off-screen render of', url, '| reason:', triggerReason);
+
+  let rendered = null;
+  try {
+    rendered = await chrome.runtime.sendMessage({ type: 'NEXUSKITTY_FETCH_RENDERED', url });
+  } catch (renderError) {
+    console.log('NexusKitty [RENDER]: rendered fetch unavailable', renderError?.message || renderError);
+    return null;
+  }
+
+  if (!rendered?.ok || !rendered.text) {
+    console.log('NexusKitty [RENDER]: no rendered text for', url, '| reason:', rendered?.reason || rendered?.error || 'unknown');
+    // A broken attempt (extension API error, timeout, no response) says nothing
+    // about the document, so it must not burn the 90s cooldown - otherwise one
+    // failure makes the next extraction passes of the same page give up without
+    // ever retrying, and the popup reports "only the surrounding page".
+    const transient = !rendered || rendered.reason === 'exception' || rendered.reason === 'render_unavailable' || Boolean(rendered.error);
+    if (transient) {
+      renderedFetchAttemptedAt.delete(cacheKey);
+      console.log('NexusKitty [RENDER]: attempt was transient, allowing an immediate retry');
+    }
+    return null;
+  }
+
+  const renderedClean = stripJunkNoise(cleanText(rendered.text));
+  console.log('NexusKitty [RENDER]: rendered text for', url, '->', renderedClean.length, 'chars (raw', (rendered.text || '').length, ')');
+
+  if (renderedClean.length < 200 || looksLikeSourceCodeNotProse(renderedClean)) {
+    // The page DID render a real document, but stripJunkNoise/cleanText threw
+    // almost all of it away - typical for a cookie-policy page whose body is
+    // mostly links with a long prose block the heuristic mis-weights. Dropping
+    // the document entirely leaves the popup with nothing, which is worse than
+    // handing the model some navigation noise along with the policy text.
+    const rawText = (rendered.text || '').trim();
+    if (rawText.length >= 1200 && !looksLikeSourceCodeNotProse(rawText)) {
+      console.log('NexusKitty [RENDER]: keeping the unstripped render for', url, '->', rawText.length, 'chars');
+      fetchedLegalPageCache.set(cacheKey, { text: rawText, timestamp: Date.now(), ttl: RENDERED_PAGE_CACHE_TTL });
+      fetchedPageFailureReasons.delete(cacheKey);
+      return rawText;
+    }
+    console.log('NexusKitty [RENDER]: rendered text rejected as too thin or source-like', url);
+    return null;
+  }
+
+  fetchedLegalPageCache.set(cacheKey, {
+    text: renderedClean,
+    timestamp: Date.now(),
+    // A rendered page is far more expensive to obtain than a static fetch, so
+    // it gets its own, much longer TTL. Without it the 20s static cache and
+    // the 90s render cooldown left a dead window: after 20s the success was
+    // gone, and the cooldown refused to re-render until 90s, so the next
+    // extraction of the same page returned 0 chars and reported the site as
+    // "JS-rendered, nothing found" (learngerman.dw.com did exactly this).
+    ttl: RENDERED_PAGE_CACHE_TTL,
+  });
+  fetchedPageFailureReasons.delete(cacheKey);
+  return renderedClean;
+}
+
 async function fetchLegalPageText(url) {
   // FIX: reuse an already-fetched-and-cleaned copy of this exact legal
   // page if we fetched it within the last few seconds. This is what
@@ -560,39 +923,142 @@ async function fetchLegalPageText(url) {
   // see the duplicated entries in the Network tab.
   const cacheKey = normalizeLegalUrl(url);
   const cachedEntry = fetchedLegalPageCache.get(cacheKey);
-  if (cachedEntry && Date.now() - cachedEntry.timestamp < FETCHED_PAGE_CACHE_TTL) {
-    console.log('NexusKitty [CACHE]: reusing fetched legal page', url);
+  // Per-entry TTL: rendered results carry their own, much longer one.
+  const entryTtl = cachedEntry?.ttl || FETCHED_PAGE_CACHE_TTL;
+  if (cachedEntry && Date.now() - cachedEntry.timestamp < entryTtl) {
+    console.log('NexusKitty [CACHE]: reusing fetched legal page', url, cachedEntry.ttl ? '(rendered)' : '');
     return cachedEntry.text;
   }
+  // NOTE: deliberately NOT clearing fetchedPageFailureReasons here. On a
+  // cache hit (popup.js polls up to 6 times within the 20s TTL) a real fetch
+  // never runs, so clearing the reason would make every later pass report
+  // "unknown" and suppress the JS-rendered detection. Clear it only when an
+  // actual fetch is about to happen.
 
   try {
+    fetchedPageFailureReasons.delete(cacheKey);
     const response = await chrome.runtime.sendMessage({ type: 'NEXUSKITTY_FETCH_URL', url });
-    if (!response?.ok || !response.html) return '';
+
+    // FIX: a definitive HTTP failure (4xx/5xx) is not a transient hiccup -
+    // it means the server categorically refused this URL (e.g. bot
+    // protection on a help-center article, like adidas.com's
+    // "what-is-the-privacy-policy" returning 403). Retrying it on every
+    // polling tick within the same popup session just repeats the same
+    // blocked request over the network for no gain. Cache the empty
+    // result too, same short TTL as a genuine success, so subsequent
+    // extraction passes within this popup session skip it.
+    // NOTE: response.ok is the service worker's own wrapper flag
+    // (background.js does sendResponse({ ok: true, ...result })), so it is
+    // true even for a 403 - the real HTTP status lives in response.status.
+    // A missing/failed sendMessage (network/timeout error, no response)
+    // is NOT cached here - that still falls through to the catch block
+    // below and stays retryable.
+    if (response && typeof response.status === 'number' && response.status >= 400) {
+      // 403/429/503 are edge bot protection, not a decision about the document:
+      // betano.bg answers a background fetch with a Cloudflare "Betano Splash
+      // Screen" page (403), because the request has no browser fingerprint and
+      // no cookies. The off-screen/debugger render is a real browser navigation
+      // and does get through, so try it before giving up. Only a hard refusal
+      // (404/410 and friends) is cached straight away.
+      const isEdgeBlock = response.status === 403 || response.status === 429 || response.status === 503;
+      if (isEdgeBlock) {
+        console.log('NexusKitty [DIAG]: edge/bot block', response.status, 'for', url, '- trying a real browser render');
+        const renderedText = await attemptRenderedFetch(url, cacheKey, `edge block ${response.status}`);
+        if (renderedText) return renderedText;
+      }
+      console.log('NexusKitty [CACHE]: caching definitive HTTP failure', response.status, url);
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_HTTP);
+      fetchedLegalPageCache.set(cacheKey, { text: '', timestamp: Date.now() });
+      return '';
+    }
+
+    if (!response?.ok || !response.html) {
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_THIN);
+      console.log('NexusKitty [DIAG]: static fetch produced no body for', url, '- trying a rendered tab');
+      const renderedText = await attemptRenderedFetch(url, cacheKey, 'static fetch returned no body (timeout or transport error)');
+      if (renderedText) return renderedText;
+      return '';
+    }
     // FIX: reject non-HTML responses up front using the content-type
     // background.js now reports (see NEXUSKITTY_FETCH_URL / fetchLegalUrl).
     const contentType = (response.contentType || '').toLowerCase();
     if (contentType && !/text\/html|application\/xhtml/.test(contentType)) {
       console.log('NexusKitty [FILTER]: Skipping non-HTML content-type', contentType, url);
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_CONTENT_TYPE);
       return '';
     }
     const early = response.html.slice(0, 3000);
     if (/reCAPTCHA.*quota|quota limits|enterprise quota|exceeding recaptcha|Issued to.*IASME/i.test(early)) {
       console.log('NexusKitty [FILTER]: Skipping quota/certificate page', url);
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_QUOTA);
       return '';
     }
     const parser = new DOMParser(); const doc = parser.parseFromString(response.html, 'text/html');
+
+    // FIX: modern frameworks (Next.js App Router, Nuxt, Remix) often ship the
+    // article text ONLY inside a JSON payload embedded in a <script> tag -
+    // e.g. self.__next_f.push([1,"...escaped RSC chunk..."]) or
+    // <script id="__NEXT_DATA__" type="application/json">. The next line
+    // deletes every <script>, so that text used to vanish and the page
+    // extracted to 0 characters despite 250+ kB of markup. Mine the payload
+    // BEFORE removing scripts and keep it as a second source.
+    const payloadProse = extractEmbeddedPayloadProse(doc);
+    const payloadScripts = doc.querySelectorAll('script').length;
+    const payloadWithProse = payloadProse.length;
+
     doc.querySelectorAll('script, style, nav, header, footer, svg, noscript').forEach((el) => el.remove());
     const mainNode = doc.querySelector('main, article, [role="main"],.content, #content, body');
-    if (!mainNode) return '';
-    const raw = cleanText(mainNode.textContent || mainNode.innerText || '');
-    const cleaned = stripJunkNoise(raw);
-    if (cleaned.length < 200) return '';
-    if (/Issued to|IASME|Recaptcha requires/i.test(cleaned.slice(0, 800)) && cleaned.length < 1200) return '';
+    const raw = mainNode ? cleanText(mainNode.textContent || mainNode.innerText || '') : '';
+    let cleaned = stripJunkNoise(raw);
+    // DIAGNOSTIC: a client-side-rendered page returns tens of kB of HTML whose
+    // <body> is an empty mount point, so `raw` collapses to a handful of
+    // characters even though the fetch succeeded. Logging the numbers makes
+    // that distinguishable from a content-type rejection or a decode failure.
+    // Decisive check: does the raw HTML contain policy prose AT ALL (even
+    // inside a script payload)? If not, the page is genuinely client-side
+    // rendered and no amount of static parsing can recover it.
+    const policyWordHits = (response.html.match(/бисквит|персонални данни|доверителност|privacy policy|personal data|cookie polic|terms of use|условия за ползване/gi) || []).length;
+
+    console.log(
+      'NexusKitty [FETCH]:', url,
+      '| html chars:', response.html.length,
+      '| mainNode:', mainNode ? (mainNode.tagName || '?').toLowerCase() : 'none',
+      '| raw:', raw.length,
+      '| cleaned:', cleaned.length,
+      '| scripts:', payloadScripts,
+      '| payload prose:', payloadWithProse,
+      '| policy words in raw html:', policyWordHits
+    );
+    // Prefer the rendered DOM text; fall back to the embedded JSON payload
+    // when the DOM is just an app shell.
+    if (cleaned.length < 200 && payloadProse.length >= 200) {
+      console.log('NexusKitty [FETCH]: using embedded JSON payload prose instead of empty DOM', url);
+      cleaned = payloadProse;
+    }
+
+    // Last resort before giving up: open the URL in an inactive tab and read
+    // the DOM AFTER JavaScript has run (see attemptRenderedFetch).
+    if (cleaned.length < 200 && response.html.length >= 2000) {
+      const renderedText = await attemptRenderedFetch(url, cacheKey, 'static extraction too thin');
+      if (renderedText) return renderedText;
+    }
+    if (cleaned.length < 200) {
+      // Big HTML that yields almost no prose = the body is an empty mount
+      // point filled in by JavaScript after hydration.
+      const reason = response.html.length >= 2000 ? FETCH_REASON_JS_RENDERED : FETCH_REASON_THIN;
+      fetchedPageFailureReasons.set(cacheKey, reason);
+      return '';
+    }
+    if (/Issued to|IASME|Recaptcha requires/i.test(cleaned.slice(0, 800)) && cleaned.length < 1200) {
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_QUOTA);
+      return '';
+    }
     // FIX: reject bodies that look like source code rather than prose
     // (covers the case where content-type was misreported as text/html
     // by a misconfigured server but the body is really a JS bundle).
     if (looksLikeSourceCodeNotProse(cleaned)) {
       console.log('NexusKitty [FILTER]: Skipping source-code-looking body', url);
+      fetchedPageFailureReasons.set(cacheKey, FETCH_REASON_SOURCE);
       return '';
     }
 
@@ -690,14 +1156,258 @@ function getActiveConsentPopup() {
   if (containers.length > 0) { const fullText = extractCMPDetails(containers[0].node); return { node: containers[0].node, text: fullText }; }
   return null;
 }
+// NOTE: a per-language LEGAL_CONTENT_MARKERS keyword list used to live here
+// (EN/DE/BG/RU/FR/ES/IT/PT/TR/NL/PL). It was removed on purpose - see the
+// prose-based gate below. Adding the next language to a list only postpones
+// the same bug; the structural test has no vocabulary to maintain.
+
+// ============================================================
+// LANGUAGE-AGNOSTIC PROSE DETECTION
+// ============================================================
+// FIX: this replaced a hardcoded list of English/German/Bulgarian/... legal
+// keywords. A keyword list can never be universal - the next language breaks
+// it again, and until now a correctly extracted page was thrown away as
+// "not important enough" purely because nobody had added its language yet.
+//
+// Instead we ask a question that has the same answer in every language:
+// does this text look like running PROSE rather than navigation, code, markup
+// or a list of links? That is measurable from Unicode letter classes, sentence
+// terminators (including CJK 。！？ and Devanagari danda ।) and symbol density,
+// none of which depend on knowing the words.
+//
+// The remaining question - "is this document about privacy/cookies/terms?" -
+// is semantic, and the LLM already answers it for any language, so it stays
+// on the backend instead of being guessed from a vocabulary here.
+const PROSE_MIN_LENGTH = 300;
+const PROSE_SCORE_THRESHOLD = 0.55;
+
+function scoreProseQuality(text) {
+  if (!text) return 0;
+
+  const sample = text.length > 6000 ? text.slice(0, 6000) : text;
+  const total = sample.length;
+  if (total < 50) return 0;
+
+  // Combining marks (Devanagari matras, Arabic/Hebrew diacritics) are part of
+  // the letters for this purpose - without them, Hindi and Arabic score worse
+  // than English purely because of how their script encodes vowels.
+  const letters = (sample.match(/[\p{L}\p{M}]/gu) || []).length;
+  const digits = (sample.match(/\p{N}/gu) || []).length;
+  const alnum = letters + digits;
+
+  // 1. Letter density. Prose in ANY script is dominated by letters; source
+  //    code, markup and symbol soup are not.
+  const letterRatio = letters / total;
+
+  // 2. Symbol density: everything that is neither letter, digit, whitespace nor
+  //    common sentence punctuation. Braces, brackets, slashes and quotes pile
+  //    up in code and nav menus.
+  const symbols = (sample.match(/[^\p{L}\p{M}\p{N}\s.,;:!?'"()\[\]{}\-–—/\\]/gu) || []).length;
+  const symbolRatio = symbols / total;
+
+  // 3. Sentence structure. Count universal terminators; average length between
+  //    them separates prose from a run of link labels. A period between two
+  //    digits is a decimal point, not a sentence end (otherwise "12.99" makes
+  //    a price list look like well-punctuated prose).
+  const terminators = (sample.match(/(?<!\d)[.!?…]|[。！？।؟۔]/gu) || []).length;
+  const sentenceCount = Math.max(terminators, 1);
+  const avgSentenceLength = alnum / sentenceCount;
+
+  // 4. Digit density. Legal prose mentions numbers occasionally; a price list,
+  //    a table of SKUs or a stats widget is mostly digits.
+  const digitRatio = digits / Math.max(alnum, 1);
+
+  // 5. Type-token ratio: how much of the text is made of words that appear
+  //    only once. Running prose is lexically varied; a navigation menu or a
+  //    repeated template ("Product A 12.99 Product B ...") is not. Measured on
+  //    space-separated tokens, so it is meaningless for scripts without spaces
+  //    - there the token count is tiny and the ratio is simply not applied.
+  const tokens = sample.split(/\s+/).filter((token) => /\p{L}/u.test(token));
+  let typeTokenRatio = 1;
+  if (tokens.length >= 40) {
+    typeTokenRatio = new Set(tokens.map((token) => token.toLowerCase())).size / tokens.length;
+  }
+
+  let score = 0;
+  if (letterRatio >= 0.55) score += 0.45;
+  else if (letterRatio >= 0.4) score += 0.3;
+  else if (letterRatio >= 0.25) score += 0.1;
+
+  if (symbolRatio <= 0.02) score += 0.25;
+  else if (symbolRatio <= 0.05) score += 0.15;
+  else if (symbolRatio <= 0.1) score += 0.05;
+
+  if (terminators >= 3) score += 0.2;
+  else if (terminators >= 1) score += 0.1;
+  // No sentence punctuation at all is the strongest single tell for a
+  // list of labels - a menu, a button row, a breadcrumb. Prose in every
+  // script ends sentences somehow (including CJK ideographic marks).
+  else score -= 0.3;
+
+  // Prose sentences run long; a nav menu is a run of 2-3 word labels.
+  if (terminators >= 1 && avgSentenceLength >= 45) score += 0.15;
+  else if (terminators >= 1 && avgSentenceLength >= 20) score += 0.08;
+
+  if (digitRatio > 0.08) score -= 0.2;
+  if (typeTokenRatio < 0.35) score -= 0.15;
+
+  // Enough letters to be a real body of text. Deliberately NOT a space count,
+  // so scripts without word separators (Chinese, Japanese, Thai) are not
+  // penalised.
+  if (letters > 400) score += 0.05;
+
+  return Math.max(0, Math.min(1, score));
+}
+
+function looksLikeProseDocument(text) {
+  if (!text) return false;
+  if (text.length < PROSE_MIN_LENGTH) return false;
+  if (looksLikeSourceCodeNotProse(text)) return false;
+  return scoreProseQuality(text) >= PROSE_SCORE_THRESHOLD;
+}
+
+// Second, lower bar for genuinely short legal pages. A consent-settings page
+// with six cookie categories is legitimate policy text of ~600 characters, not
+// noise - it was being discarded purely for length (DW's
+// /datenschutzeinstellungen/privacy-settings-de extracts to 629 chars). It
+// still has to clear the "is this prose at all" test, just with less margin.
+const PROSE_SCORE_THRESHOLD_LOW = 0.4;
+
+function looksLikeShortLegalPage(text) {
+  if (!text) return false;
+  if (text.length < 300) return false;
+  if (looksLikeSourceCodeNotProse(text)) return false;
+  return scoreProseQuality(text) >= PROSE_SCORE_THRESHOLD_LOW;
+}
+
 async function extractMainText() {
   console.log('NexusKitty [DIAG]: extractMainText() started for', window.location.href);
+  lastExtractionUsedSurroundingPage = false;
+  lastExtractionJsRenderedSuspect = false;
   if (isTechnicalCmpIframe()) { console.log('[NEXUSKITTY] Skipping technical iframe:', window.location.href); return ''; }
   const signals = detectLegalPageSignals();
   const { isLegalPage } = signals;
 
   let legalLinks = findLegalLinks();
+  // In-page anchors are not separate documents. Betano's table of contents
+  // links to #Paragraph3 / #Paragraph7 of the very page being analysed, so
+  // treating them as legal pages made the same document be fetched and
+  // rendered again under a different URL (and paid for twice in translation).
+  const selfUrl = normalizeLegalUrl(window.location.href);
+  const anchorsDropped = legalLinks.filter((link) => normalizeLegalUrl(link.href) === selfUrl);
+  if (anchorsDropped.length) {
+    console.log(
+      'NexusKitty [DIAG]: STEP_0 dropped', anchorsDropped.length,
+      'self-anchor link(s):', anchorsDropped.map((l) => l.href)
+    );
+    legalLinks = legalLinks.filter((link) => normalizeLegalUrl(link.href) !== selfUrl);
+  }
   console.log('NexusKitty [DIAG]: STEP_1 findLegalLinks() found', legalLinks.length, legalLinks);
+
+  // A link whose normalized path is the site root ("https://sesame.bg/#",
+  // "/?ref=footer") is a homepage, not a policy document. Rendering it returns
+  // 4.7 kB of casino navigation that then competes with the real privacy text
+  // for the analysis budget. Only keep the root when the page being analysed
+  // IS the root - there is nothing else to read in that case.
+  const isRootPath = (href) => {
+    try {
+      const parsed = new URL(href, window.location.href);
+      const path = parsed.pathname.replace(/\/+$/, '');
+      return path === '' || /^\/(index|home|main)\.[a-z]{2,4}$/i.test(path);
+    } catch { return false; }
+  };
+  const rootDropped = legalLinks.filter((link) => isRootPath(link.href) && normalizeLegalUrl(link.href) !== selfUrl);
+  if (rootDropped.length) {
+    console.log('NexusKitty [DIAG]: STEP_0b dropped', rootDropped.length, 'homepage link(s):', rootDropped.map((l) => l.href));
+    legalLinks = legalLinks.filter((link) => !rootDropped.includes(link));
+  }
+
+  // Translated duplicates of one document. Localised legal sites publish the
+  // same article under several paths that share the article id, e.g.
+  // /statiya/pravila-i-usloviya/339282/ and /en/article/terms-conditions/339282/
+  // both carry id 339282. Each variant was fetched, rendered and paid for in
+  // translation separately, which roughly doubled the runtime and added
+  // nothing: the translated copy states the same terms.
+  const documentIdentityKey = (href) => {
+    try {
+      const parsed = new URL(href, window.location.href);
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      const idSegment = [...segments].reverse().find((segment) => /\d{3,}/.test(segment));
+      return idSegment
+        ? `${parsed.origin}#${idSegment.match(/\d{3,}/)[0]}`
+        : normalizeLegalUrl(href);
+    } catch { return normalizeLegalUrl(href); }
+  };
+  const languagePrefix = (href) => {
+    try {
+      const segment = new URL(href, window.location.href).pathname.split('/').filter(Boolean)[0] || '';
+      return /^[a-z]{2}(-[a-z]{2})?$/i.test(segment) ? segment.toLowerCase() : '';
+    } catch { return ''; }
+  };
+  const selfLanguage = languagePrefix(window.location.href);
+  const dedupeTranslatedDuplicates = (links) => {
+    const kept = [];
+    const dropped = [];
+    for (const link of links) {
+      const key = documentIdentityKey(link.href);
+      const index = kept.findIndex((candidate) => documentIdentityKey(candidate.href) === key);
+      if (index === -1) {
+        kept.push(link);
+        continue;
+      }
+      const existing = kept[index];
+      const sameLanguage = languagePrefix(link.href) === languagePrefix(existing.href);
+      const prefersCurrentLanguage = languagePrefix(link.href) === selfLanguage && languagePrefix(existing.href) !== selfLanguage;
+      const preferLink = prefersCurrentLanguage
+        || (sameLanguage && link.score > existing.score)
+        || (sameLanguage && link.score === existing.score && link.href.length < existing.href.length);
+      if (preferLink) {
+        kept[index] = link;
+        dropped.push(existing.href);
+      } else {
+        dropped.push(link.href);
+      }
+    }
+    return { links: kept, dropped };
+  };
+  const identityFiltered = dedupeTranslatedDuplicates(legalLinks);
+  if (identityFiltered.dropped.length) {
+    console.log('NexusKitty [DIAG]: STEP_0c dropped', identityFiltered.dropped.length, 'translated duplicate(s):', identityFiltered.dropped);
+  }
+  legalLinks = identityFiltered.links;
+
+  // FIX: sitemap discovery used to run ONLY when the page contained zero legal
+  // links. One footer link was enough to suppress it, which is how
+  // learngerman.dw.com ended up analysing a 629-character cookie-settings
+  // page while the real privacy declaration (a-64905194, linked only from the
+  // sitemap) was never fetched. Discovery now SUPPLEMENTS what was found on
+  // the page, and it is cached per origin, so the extra robots.txt/sitemap.xml
+  // requests happen at most once per session.
+  if (legalLinks.length < 3) {
+    const domainUrls = await discoverDomainLegalLinks();
+    if (domainUrls.length) {
+      const origin = window.location.origin;
+      const known = new Set(legalLinks.map((link) => normalizeLegalUrl(link.href)));
+      const extra = domainUrls
+        .filter((href) => {
+          try { return new URL(href).origin === origin; } catch { return false; }
+        })
+        .filter((href) => !/iasme|certificate|blockmarktech|recaptcha.*quota|trusted-shops/i.test(href))
+        .map((href) => ({ href, text: '', score: scoreLegalImportance(href, '') }))
+        .filter((candidate) => candidate.score >= 4 && !known.has(normalizeLegalUrl(candidate.href)));
+      if (extra.length) {
+        console.log('NexusKitty [DIAG]: STEP_1b sitemap added', extra.length, 'legal candidates');
+        const merged = dedupeTranslatedDuplicates([...legalLinks, ...extra]);
+        if (merged.dropped.length) {
+          console.log('NexusKitty [DIAG]: STEP_1b dropped', merged.dropped.length, 'translated duplicate(s):', merged.dropped);
+        }
+        legalLinks = merged.links
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MAX_LEGAL_LINKS);
+      }
+    }
+  }
+
   if (legalLinks.length === 0) {
     const domainUrls = await discoverDomainLegalLinks();
     if (domainUrls.length) {
@@ -705,10 +1415,18 @@ async function extractMainText() {
       legalLinks = domainUrls.filter(u => { try { return new URL(u).origin === origin; } catch { return false; } })
         .filter(u => !/iasme|certificate|blockmarktech|recaptcha.*quota|trusted-shops/i.test(u))
         .map(href => ({ href, text: '', score: scoreLegalImportance(href, '') }))
-        .filter(o => o.score >= 0)
+        // score >= 0 accepted EVERY sitemap entry, so a shop sitemap filled the
+        // document list with product pages. Only URLs that actually look like a
+        // policy survive now.
+        .filter(o => o.score >= 4)
         .sort((a, b) => b.score - a.score)
         .slice(0, MAX_LEGAL_LINKS);
-      console.log('NexusKitty [DIAG]: STEP_1b sitemap discovered', legalLinks.length, legalLinks);
+      const finalFilter = dedupeTranslatedDuplicates(legalLinks);
+      if (finalFilter.dropped.length) {
+        console.log('NexusKitty [DIAG]: STEP_1c dropped', finalFilter.dropped.length, 'translated duplicate(s):', finalFilter.dropped);
+      }
+      legalLinks = finalFilter.links;
+      console.log('NexusKitty [DIAG]: STEP_1c sitemap discovered', legalLinks.length, legalLinks);
     }
   }
 
@@ -728,14 +1446,47 @@ async function extractMainText() {
       const sig = textSignature(r.text);
       if (seen.has(sig)) { console.log('DEDUP skip', r.href); continue; }
       seen.add(sig);
-      if (!/(personal data|privacy|cookie|consent|terms|geolocation|third[- ]party|advertising partner|store and\/or access|we and our partners)/i.test(r.text)) {
-        console.log('Not important enough, skip', r.href);
+      // FIX: "is this worth sending to the LLM?" used to be answered with a
+      // hardcoded English keyword list, so every correctly extracted
+      // non-English page (Datenschutz, поверителност, données personnelles, ...)
+      // was discarded as "not important enough". It is now a language-agnostic
+      // prose test - does this read as running text rather than navigation,
+      // code or a list of links? The semantic question is left to the LLM,
+      // which understands every language.
+      const proseScore = scoreProseQuality(r.text);
+      const isProse = proseScore >= PROSE_SCORE_THRESHOLD && r.text.length >= PROSE_MIN_LENGTH;
+      const isShortLegalPage = !isProse && looksLikeShortLegalPage(r.text);
+      if (!isProse && !isShortLegalPage) {
+        console.log('Not prose, skip', r.href, '| score:', proseScore.toFixed(2), '| chars:', r.text.length);
         continue;
+      }
+      if (isShortLegalPage) {
+        console.log('Short but prose-like, keeping', r.href, '| score:', proseScore.toFixed(2), '| chars:', r.text.length);
       }
       important.push(r);
     }
     fetchedMeta = important;
     fetchedPagesText = important.map(r => `[SOURCE: ${r.href} | score ${r.score}]\n${r.text}`).join('\n\n--- NEXT LEGAL SECTION ---\n\n');
+
+    // FIX: we DID find legal URLs, but every one came back with no usable
+    // text. Only claim "rendered by JavaScript" when the evidence supports
+    // it: the fetch returned a large HTML document whose body collapsed to
+    // almost nothing. Other reasons (403, PDF content-type, quota page, JS
+    // bundle) must not be mislabelled as CSR.
+    const reasonCounts = {};
+    for (const link of legalLinks) {
+      const reason = fetchedPageFailureReasons.get(normalizeLegalUrl(link.href)) || 'unknown';
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    }
+    if (important.length === 0 && results.every(r => r.text.length === 0)) {
+      console.log(
+        'NexusKitty [DIAG]: STEP_1b legal pages found but all fetched empty',
+        JSON.stringify(reasonCounts), 'of', legalLinks.length
+      );
+      if ((reasonCounts[FETCH_REASON_JS_RENDERED] || 0) === legalLinks.length) {
+        lastExtractionJsRenderedSuspect = true;
+      }
+    }
   }
   console.log('NexusKitty [DIAG]: STEP_1 fetchedPagesText length =', fetchedPagesText.length, 'from', fetchedMeta.length, 'important pages');
 
@@ -783,28 +1534,61 @@ async function extractMainText() {
   const structuralBannerText = structuralConsent.length ? structuralConsent[0].text.slice(0, BANNER_BUDGET) : '';
   let bannerText = popupText.length >= structuralBannerText.length ? popupText : structuralBannerText;
   bannerText = stripJunkNoise(bannerText);
+  // FIX: the consent dialog is DOM-based, not fetched, so it never went
+  // through fetchLegalPageText()'s looksLikeSourceCodeNotProse() guard. A CMP
+  // that leaks its tracking snippet as text (unclosed <script>, debug output
+  // in a hidden <pre>/<div>) produced a "banner" that was pure JavaScript,
+  // which the LLM then reported as policy clauses about localStorage and
+  // postMessage. Apply the same guard here.
+  if (bannerText && looksLikeSourceCodeNotProse(bannerText)) {
+    console.log('NexusKitty [FILTER]: Skipping source-code-looking banner text', bannerText.length, 'chars');
+    bannerText = '';
+  }
   console.log('NexusKitty [DIAG]: STEP_3 final bannerText length =', bannerText.length);
 
+  // Per-section budgets. The deep scan used to be a flat slice(0, 6000), so a
+  // site with a cookie policy AND a privacy declaration only ever sent the
+  // first document - the model then answered from a fragment. Each source block
+  // now gets its own share of the deep-scan budget.
   const sections = [];
   if (bannerText && bannerText.length >= 80) {
-    sections.push(`[Active Consent Popup / Cookie Banner - PRIORITY - MUST REVIEW]\n${bannerText.slice(0, 5000)}`);
+    sections.push(`[Active Consent Popup / Cookie Banner - PRIORITY - MUST REVIEW]\n${bannerText.slice(0, CONSENT_BANNER_CHARS)}`);
   }
   if (dedicatedPageText) {
-    sections.push(`[Main Document - Dedicated Legal Page]\n${dedicatedPageText.slice(0, 3000)}`);
+    sections.push(`[Main Document - Dedicated Legal Page]\n${dedicatedPageText.slice(0, MAIN_DOC_CHARS)}`);
   }
   if (fetchedPagesText) {
-    sections.push(`[Deep Scan of Sitemap - ${fetchedMeta.length} Important Legal Pages]\n${fetchedPagesText.slice(0, 6000)}`);
+    sections.push(
+      `[Deep Scan of Sitemap - ${fetchedMeta.length} Important Legal Pages]\n` +
+      sampleSourcesProportionally(fetchedPagesText, DEEP_SCAN_CHARS)
+    );
   }
 
   let combinedResult = sections.join('\n\n').trim();
   combinedResult = stripJunkNoise(combinedResult);
   console.log('NexusKitty [DIAG]: STEP_5 combinedResult length =', combinedResult.length, 'sections:', sections.length, 'preview:', combinedResult.slice(0, 400));
 
-  if (combinedResult.length > 100) return combinedResult.slice(0, MAX_TEXT_LENGTH);
+  if (combinedResult.length > 100) return combinedResult.slice(0, COMBINED_TEXT_CAP);
 
+  // Last resort: the current page's own text. It is NOT the legal document
+  // unless this page happens to be one, so flag it for the popup.
   const fallback = getTextExcludingOverlays(document.body) || cleanText(document.body?.innerText || '');
-  const cleanedFallback = stripJunkNoise(fallback);
-  if (cleanedFallback.length > 300) return cleanedFallback.slice(0, MAX_TEXT_LENGTH);
+  let cleanedFallback = stripJunkNoise(fallback);
+  // Same guard as the fetched-page paths: a body that is mostly JS source is
+  // not prose, and sending it to the LLM only produces invented "findings".
+  if (cleanedFallback && looksLikeSourceCodeNotProse(cleanedFallback)) {
+    console.log('NexusKitty [FILTER]: Skipping source-code-looking fallback body', cleanedFallback.length, 'chars');
+    cleanedFallback = '';
+  }
+  if (cleanedFallback.length > 300) {
+    lastExtractionUsedSurroundingPage = !isLegalPage;
+    console.log(
+      'NexusKitty [DIAG]: FALLBACK to surrounding page text',
+      cleanedFallback.length,
+      'chars, isLegalPage =', isLegalPage
+    );
+    return cleanedFallback.slice(0, MAX_TEXT_LENGTH);
+  }
   return 'No readable text found on this page.';
 }
 
@@ -1045,9 +1829,19 @@ async function buildPagePayload(forceRefresh = false) {
 
   if (inFlightBuildPromise) return inFlightBuildPromise;
 
+  // The throttle below exists to stop a burst of polling from re-running the
+  // whole pipeline. Applied blindly it also froze the popup on a USELESS
+  // payload: on sesame.bg the first pass returned the 57-character "no text"
+  // fallback, every following poll got that same fallback back for 1.5s, and
+  // the popup read it as "converged, nothing here". A pass that produced no
+  // usable text must never be served as an answer - it only means "not ready".
+  const lastTextLength = String(lastExtractionPayload?.text || '').trim().length;
+  const lastWasUnusable = lastExtractionPayload ? lastTextLength < 300 : false;
+
   if (
     forceRefresh &&
     lastExtractionPayload &&
+    !lastWasUnusable &&
     Date.now() - lastExtractionAt < MIN_REEXTRACTION_INTERVAL_MS
   ) {
     console.log('NexusKitty [THROTTLE]: skipping re-extraction, returning last payload');
@@ -1072,7 +1866,7 @@ async function buildPagePayload(forceRefresh = false) {
         analysisText = translation.text || text; detectedLanguage = translation.detectedLang; wasTranslated = translation.translated;
       }
       const trackers = detectTrackers(); const consentControls = getConsentSnapshot(); const legalSurface = hasLegalSurface();
-      const payload = { text, analysis_text: analysisText, detected_language: detectedLanguage, translated: wasTranslated, trackers, detected_trackers: trackers, consent_controls: consentControls, legal_surface: legalSurface, url: window.location.href, hostname: window.location.hostname, title: document.title || '' };
+      const payload = { text, analysis_text: analysisText, detected_language: detectedLanguage, translated: wasTranslated, trackers, detected_trackers: trackers, consent_controls: consentControls, legal_surface: legalSurface, used_surrounding_page: lastExtractionUsedSurroundingPage, js_rendered_suspected: lastExtractionJsRenderedSuspect, url: window.location.href, hostname: window.location.hostname, title: document.title || '' };
       if (!isFallback) await writePageCache(payload);
       // FIX: record every completed extraction (fallback or not) so the
       // throttle above has something recent to hand back to the next
@@ -1096,8 +1890,81 @@ async function applyRiskWarning(categories, shouldWarn) {
     createConsentHud(button);
   });
 }
+// =========================================================
+// OFF-SCREEN RENDER FRAME PROTOCOL
+// =========================================================
+// When this frame was created by the off-screen render host, its window.name
+// carries "nk-render-<token>". The service worker uses that to ask exactly
+// this frame for its rendered text, which is how client-side rendered legal
+// pages are read WITHOUT opening a visible tab. On a normal page nothing
+// happens: the name never matches, so this code stays completely inert.
+const RENDER_FRAME_PREFIX = 'nk-render-';
+const RENDER_FRAME_HASH_KEY = '__nk_render';
+
+function getRenderFrameToken() {
+  // Primary: the marker the off-screen host put in the fragment. window.name is
+  // only a fallback because plenty of sites overwrite it, which used to break
+  // the handshake silently.
+  try {
+    const marker = new URLSearchParams(window.location.hash.replace(/^#/, '')).get(RENDER_FRAME_HASH_KEY);
+    if (marker) return marker;
+  } catch (e) {}
+
+  try {
+    if (typeof window.name === 'string' && window.name.startsWith(RENDER_FRAME_PREFIX)) {
+      return window.name.slice(RENDER_FRAME_PREFIX.length);
+    }
+  } catch (e) {}
+  return null;
+}
+
+if (getRenderFrameToken()) {
+  // The host's marker lives in the fragment; it must never leak into the URL we
+  // report back as the document's final address.
+  const cleanHref = () => {
+    try {
+      const parsed = new URL(location.href);
+      parsed.hash = parsed.hash.replace(new RegExp(`[&]?${RENDER_FRAME_HASH_KEY}=[^&]*`), '');
+      return parsed.href;
+    } catch (e) {
+      return location.href.split('#')[0];
+    }
+  };
+  const announceRenderFrame = () => {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'NEXUSKITTY_RENDER_FRAME_READY',
+        token: getRenderFrameToken(),
+        href: cleanHref(),
+        title: document.title || '',
+        readyState: document.readyState,
+      });
+    } catch (e) {}
+  };
+  // document_idle already means the document is parsed; a short delay lets
+  // client-side routes mount before the worker asks for the text.
+  setTimeout(announceRenderFrame, 800);
+}
+
 async function handleMessage(request, sender, sendResponse) {
   try {
+    if (request && request.type === 'NEXUSKITTY_RENDER_FRAME_EXTRACT') {
+      const token = getRenderFrameToken();
+      if (!token || token !== request.token) return; // not our frame: stay silent
+      const root = document.querySelector('main, article, [role="main"], .content, #content') || document.body;
+      const text = root ? (root.innerText || root.textContent || '') : '';
+      try {
+        chrome.runtime.sendMessage({
+          type: 'NEXUSKITTY_RENDER_FRAME_TEXT',
+          token,
+          text: text || '',
+          title: document.title || '',
+          href: cleanHref(),
+        });
+      } catch (e) {}
+      sendResponse({ ok: true, chars: (text || '').length });
+      return;
+    }
     if (request && request.type === 'NEXUSKITTY_GET_PAGE_DATA') { const payload = await buildPagePayload(request.force_refresh === true); sendResponse({ ok: true, ...payload }); return; }
     if (request && request.type === 'NEXUSKITTY_GET_DOCUMENT_TEXT') {
       const result = await extractDocumentTextAsync();

@@ -21,6 +21,9 @@ ENV/
 !.env.development
 !.env.production
 
+# Generated from backend/.env by scripts/sync_extension_config.py
+extension/popup/config.js
+
 # IDE
 .vscode/
 .idea/
