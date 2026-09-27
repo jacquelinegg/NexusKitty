@@ -157,12 +157,7 @@ person; it scopes history reads and writes only. Analysis caching is *not*
 scoped by it — the same public document yields the same findings for everyone,
 and sharing that cache is the point.
 
-**About `EXTENSION_API_KEY`:** the popup still requires it and sends it as
-`X-Extension-Key`, but the backend does not currently verify it. The header is
-inert. Treat the API as public and put rate limiting in front of it if that
-matters to you. An `EXTENSION_API_KEY` value was committed to this repository
-before `config.js` was git-ignored; since the repository is public, that value
-should be considered compromised and replaced everywhere it is used.
+**About `EXTENSION_API_KEY`:** About EXTENSION_API_KEY: the popup still requires it and sends it as X-Extension-Key, but the backend does not currently verify it — the header is inert. Treat the API as public and put rate limiting in front of it if that matters to you. Note: an earlier EXTENSION_API_KEY value was briefly committed before config.js was git-ignored. That key has since been rotated and revoked; if you fork this repo, generate your own fresh values for every secret rather than reusing anything from the commit history.
 
 ---
 
