@@ -93,7 +93,7 @@ added or removed since you last looked.
 
 ## What the popup gives you
 
-- **Safety prediction** (0–100, higher is safer) and a short summary.
+- **Short summary**.
 - **Findings** in six categories — Money, Privacy, User Content, AI Usage,
   Termination, Data Sale — each with an attention level, the section it came
   from, a verbatim quote, and a plain-language explanation.
