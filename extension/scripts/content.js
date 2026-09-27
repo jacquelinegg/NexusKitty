@@ -1665,7 +1665,7 @@ function scheduleReanalysisAfterIframeRelay() {
     iframeRelayReanalysisTimer = null; if (isDomainDisabledSync()) return;
     lastReanalyzedIframeTextLength = receivedIframeConsentText.length;
     try {
-      const payload = await buildPagePayload(true);
+      const payload = await buildPagePayload(true, { passive: true, reason: 'iframe consent relay' });
       if (payload?.text?.length > 0) {
         const signature = computePageSignature(payload);
         if (signature && signature === lastSentPageSignature) return;
@@ -1821,7 +1821,70 @@ let lastExtractionAt = 0;
 let lastExtractionPayload = null;
 const MIN_REEXTRACTION_INTERVAL_MS = 1500;
 
-async function buildPagePayload(forceRefresh = false) {
+// Passive payload: what THIS page shows, with no network work whatsoever.
+// No legal-link discovery, no robots.txt/sitemap, no fetching, no worker-tab
+// rendering, no translation. Those are expensive, they happen on every single
+// page load, and the user has not asked for anything yet - the extension must
+// stay quiet until the icon is clicked. Only the popup's GET_PAGE_DATA request
+// is allowed to trigger them.
+async function buildPassivePayload(reason) {
+  if (isTechnicalCmpIframe()) return { text: '', analysis_text: '', trackers: [], detected_trackers: [], consent_controls: [], legal_surface: false, passive: true, url: window.location.href, hostname: window.location.hostname, title: document.title || '' };
+
+  const signals = detectLegalPageSignals();
+  const sections = [];
+
+  const structuralConsent = getConsentContainers();
+  const structuralBannerText = structuralConsent.length ? structuralConsent[0].text.slice(0, BANNER_BUDGET) : '';
+  let bannerText = getActiveConsentPopup()?.text || '';
+  if (receivedIframeConsentText.length > bannerText.length) bannerText = receivedIframeConsentText;
+  if (structuralBannerText.length > bannerText.length) bannerText = structuralBannerText;
+  bannerText = stripJunkNoise(bannerText);
+  if (bannerText && looksLikeSourceCodeNotProse(bannerText)) bannerText = '';
+  if (bannerText && bannerText.length >= 80) {
+    sections.push(`[Active Consent Popup / Cookie Banner - PRIORITY - MUST REVIEW]\n${bannerText.slice(0, CONSENT_BANNER_CHARS)}`);
+  }
+
+  if (signals.isLegalPage) {
+    let baseText = getMainDocumentText();
+    if (!baseText || baseText.length <= 400) {
+      const bodyText = getTextExcludingOverlays(document.body);
+      if (bodyText && bodyText.length > baseText.length) baseText = bodyText;
+    }
+    if (baseText && baseText.length > 100) {
+      sections.push(`[Main Document - Dedicated Legal Page]\n${stripJunkNoise(baseText).slice(0, MAIN_DOC_CHARS)}`);
+    }
+  }
+
+  const text = stripJunkNoise(sections.join('\n\n').trim());
+  const trackers = detectTrackers();
+  const consentControls = getConsentSnapshot();
+  console.log(`NexusKitty [DIAG]: passive payload (${reason}) - no legal documents fetched, ${text.length} chars`);
+
+  return {
+    text,
+    // No translation in passive mode: that would be a network call per page load.
+    analysis_text: text,
+    detected_language: null,
+    translated: false,
+    trackers,
+    detected_trackers: trackers,
+    consent_controls: consentControls,
+    legal_surface: hasLegalSurface(),
+    used_surrounding_page: false,
+    js_rendered_suspected: false,
+    passive: true,
+    url: window.location.href,
+    hostname: window.location.hostname,
+    title: document.title || '',
+  };
+}
+
+async function buildPagePayload(forceRefresh = false, options = {}) {
+  // Passive runs first and never waits on the in-flight full extraction: the
+  // popup is not the caller here, and a page load must not be held up by - or
+  // queue behind - work nobody asked for.
+  if (options.passive === true) return buildPassivePayload(options.reason || 'passive');
+
   if (!forceRefresh) {
     const cached = await readPageCache();
     if (cached) return cached;
@@ -2020,7 +2083,11 @@ function scheduleConsentHudUpdate() {
 async function initContentScript() {
   try {
     await loadDomainSettings();
-    const payload = isDomainDisabledSync() ? null : await buildPagePayload(false);
+    // Passive on purpose. This runs on EVERY page load, in EVERY frame, before
+    // the user has clicked anything - so it must not discover legal documents,
+    // hit robots.txt/sitemap.xml, fetch a policy, open a worker tab or call the
+    // translation endpoint. The full pipeline starts when the popup asks.
+    const payload = isDomainDisabledSync() ? null : await buildPagePayload(false, { passive: true, reason: 'page load' });
     if (payload?.text?.length > 0) { try { await chrome.storage.local.set({ [`nexuskitty_page_${window.location.href}`]: payload.text }); } catch (error) {} }
     pruneExpiredCache();
     const observer = new MutationObserver((mutations) => {

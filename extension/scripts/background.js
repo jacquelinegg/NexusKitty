@@ -17,8 +17,21 @@ async function closeOrphanedRenderTab() {
     const tabId = stored?.[RENDER_TAB_STORAGE_KEY];
     await chrome.storage.session.remove(RENDER_TAB_STORAGE_KEY);
     if (typeof tabId === 'number') {
-      await chrome.tabs.remove(tabId);
-      console.log('NexusKitty [RENDER]: closed orphaned render tab', tabId);
+      // The render tab now lives in a window of its own, so close that window
+      // rather than the tab - a window with nothing else in it goes away with
+      // it, whereas closing only the tab would leave an empty window behind.
+      let closedWindow = false;
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (typeof tab?.windowId === 'number') {
+          await chrome.windows.remove(tab.windowId);
+          closedWindow = true;
+        }
+      } catch (e) {}
+      if (!closedWindow) {
+        await chrome.tabs.remove(tabId);
+      }
+      console.log('NexusKitty [RENDER]: closed orphaned render tab', tabId, closedWindow ? '(with its window)' : '');
     }
   } catch (e) {
     // No leftover tab, or it is already gone.
@@ -90,11 +103,11 @@ function decodeWithCharset(buffer, contentType) {
    target), so the render happens in a REAL TAB. To keep that unobtrusive:
      - ONE worker tab, reused for every URL - no tab storm, nothing opens and
        closes per document
-     - a normal tab in the tab strip of the window the user is already using,
-       not a second browser window
-     - inactive, muted, pinned and auto-discardable, so it never takes focus
-       and never plays sound
-     - parked on about:blank and closed after a longer idle period
+     - inside its own minimized, unfocused window, so the tab strip the user is
+       looking at never changes (a pinned policy tab that reloads per document
+       is impossible to miss and reads as the extension taking over)
+     - muted, auto-discardable and never focused, and never audible
+     - parked on about:blank and the whole window closed after an idle period
      - serialized, so concurrent legal pages queue instead of racing
    ========================================================= */
 
@@ -128,6 +141,13 @@ async function closeRenderSession() {
   chrome.storage.session.remove(RENDER_TAB_STORAGE_KEY).catch(() => {});
   if (!session) return;
   try {
+    // A render window owns exactly one tab, so closing the window is both the
+    // cheaper and the tidier teardown. The fallback path (render tab borrowed
+    // into a user window) still closes just the tab.
+    if (session.ownsWindow) {
+      await chrome.windows.remove(session.windowId);
+      return;
+    }
     await chrome.tabs.remove(session.tabId);
   } catch (e) {}
 }
@@ -139,9 +159,10 @@ function scheduleRenderSessionClose() {
   }, RENDER_TAB_IDLE_CLOSE_MS);
 }
 
-// The render tab goes into the tab strip of the window the user is reading, so
-// it has to pick that window deliberately: the last focused normal one, never
-// a minimized/offscreen/popup window and never the DevTools window.
+// Fallback only, used when creating a dedicated render window is refused: the
+// tab then has to go into a window the user is looking at, so pick that
+// deliberately - the last focused normal window, never a minimized, offscreen or
+// DevTools one.
 async function pickRenderHostWindowId() {
   const last = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
   if (typeof last?.id === 'number' && last.state !== 'minimized') return last.id;
@@ -169,29 +190,46 @@ async function ensureRenderSession() {
     renderSession = null;
   }
 
-  const windowId = await pickRenderHostWindowId();
-  // Inactive and pinned: it sits in the tab strip as a quiet placeholder and
-  // never steals focus from the page being read. NOTE: `muted` is NOT accepted
-  // by tabs.create - it is a tabs.update-only property.
-  const tab = await chrome.tabs.create({
-    windowId,
-    url: 'about:blank',
-    active: false,
-    pinned: true,
-  });
+  // A dedicated minimized window, not a tab in the window the user is reading.
+  // The tab strip is the one part of the browser they watch constantly: a pinned
+  // policy tab that reloads once per document is impossible to miss and reads as
+  // the extension taking over the browser. A minimized, unfocused window does
+  // the same work off-screen. Rendering speed is unaffected - a background tab
+  // in a visible window is throttled by Chrome in exactly the same way.
+  try {
+    const window = await chrome.windows.create({
+      url: 'about:blank',
+      state: 'minimized',
+      focused: false,
+    });
+    const tabs = await chrome.tabs.query({ windowId: window.id });
+    const tab = tabs && tabs[0];
+    if (window?.id === undefined || typeof tab?.id !== 'number') {
+      throw new Error('render window was not created');
+    }
+    try {
+      await chrome.tabs.update(tab.id, { muted: true, autoDiscardable: true, active: false });
+    } catch (e) {}
 
-  if (typeof tab?.id !== 'number') {
-    throw new Error('render tab was not created');
+    renderSession = { windowId: window.id, tabId: tab.id, ownsWindow: true };
+    console.log('NexusKitty [RENDER]: off-screen render window ready', tab.id);
+  } catch (error) {
+    // Some environments refuse the window; fall back to a quiet tab so the
+    // feature keeps working rather than failing the whole analysis.
+    console.log('NexusKitty [RENDER]: render window refused, using a background tab instead.', error?.message || error);
+    const windowId = await pickRenderHostWindowId();
+    const tab = await chrome.tabs.create({ windowId, url: 'about:blank', active: false, pinned: true });
+    if (typeof tab?.id !== 'number') {
+      throw new Error('render tab was not created');
+    }
+    try {
+      await chrome.tabs.update(tab.id, { muted: true, autoDiscardable: true });
+    } catch (e) {}
+    renderSession = { windowId, tabId: tab.id, ownsWindow: false };
   }
 
-  try {
-    await chrome.tabs.update(tab.id, { muted: true, autoDiscardable: true });
-  } catch (e) {}
-
-  renderSession = { windowId, tabId: tab.id };
-
-  // Remember the tab so a service-worker restart cannot orphan it in the strip.
-  chrome.storage.session.set({ [RENDER_TAB_STORAGE_KEY]: tab.id }).catch(() => {});
+  // Remember the tab so a service-worker restart cannot orphan it.
+  chrome.storage.session.set({ [RENDER_TAB_STORAGE_KEY]: renderSession.tabId }).catch(() => {});
   clearRenderIdleTimer();
   return renderSession;
 }
@@ -596,9 +634,11 @@ function fetchLegalUrl(url) {
      - chrome.debugger could do it, but this Chrome rejects
        chrome.debugger.attach({targetId}) ("Either tab id or extension id must
        be specified"), so Target.createTarget is unreachable for extensions.
-   What remains is one worker TAB in the tab strip of the window the user is
-   already reading: created on demand, pinned/muted/inactive, reused for every
-   URL and closed after an idle period. No second browser window is ever opened.
+   What remains is one worker tab inside a dedicated minimized, unfocused
+   window: created on demand, muted and never focused, reused for every URL,
+   and the window is closed after an idle period. The tab strip the user is
+   reading is never touched. If the window cannot be created, it falls back to a
+   pinned background tab in the current window.
    ========================================================= */
 
 // The worker tab is the only mechanism that always works, so it is the default.

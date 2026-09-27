@@ -49,10 +49,16 @@ legal URL the background service worker tries, in order:
    UTF-8. A body that is mostly source code is rejected rather than analysed.
 2. **Offscreen iframe** — for sites that allow framing, the page is loaded into a
    hidden document and the real content script reports back the rendered text.
-3. **Worker tab** — for everything else. One inactive tab is created once, kept
-   in the tab strip, and re-pointed at each URL with `active: false`. It is never
-   focused and never opened in front of you, but unlike the offscreen path it is
-   a full browser, so hydration, lazy loading and consent walls all work.
+3. **Worker tab** — for everything else. One tab is created once inside its own
+   minimized, unfocused window and re-pointed at each URL. It never takes focus,
+   never plays sound, and never appears in the tab strip you are working in;
+   the window closes itself a minute after the last document. Unlike the
+   offscreen path it is a full browser, so hydration, lazy loading and consent
+   walls all work.
+
+Nothing above happens on its own. Opening a page does local DOM work only —
+banner text, trackers, consent buttons. Discovery, fetching, rendering and
+translation start when you click the icon.
 
 Before reading the worker tab, a preparation pass clicks consent buttons
 (accept *or* reject — getting past the wall matters more than which side you
