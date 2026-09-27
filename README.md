@@ -184,8 +184,23 @@ unreachable, so a failed schema does not stop the service from starting.
 ### Extension
 
 ```bash
-python scripts/sync_extension_config.py     # generates extension/popup/config.js
+python scripts/sync_extension_config.py --app-env production
 ```
+
+`config.js` is git-ignored, because it carries `EXTENSION_API_KEY`. That means
+it is not in the repository and **anyone who clones this has to generate it
+before the extension will do anything**:
+
+```bash
+python scripts/sync_extension_config.py --app-env production
+```
+
+The script reads `EXTENSION_API_KEY` from `backend/.env`, writes it into
+`extension/popup/config.js`, and prints the backend it just pointed at —
+`APP_ENV = 'production' -> https://nexuskitty.onrender.com`. Skip this step and
+the file simply is not there: `popup.html` cannot load the configuration and the
+first request fails with "EXTENSION_API_KEY is empty". Use
+`--app-env development` if you are running FastAPI locally instead.
 
 Then `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the
 `extension` folder. `config.js` decides which backend is used:
