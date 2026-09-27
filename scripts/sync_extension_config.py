@@ -6,9 +6,16 @@ script is the single source of truth for that file: it reads EXTENSION_API_KEY
 from the backend .env and rewrites the key in extension/popup/config.js in
 place, leaving the rest of the file untouched.
 
+It can also switch APP_ENV, which decides which backend the extension talks to.
+The key and the target are two different things and forgetting the second one
+is a recurring source of "Failed to fetch" from a machine with no local backend
+running: the script happily syncs the key and leaves the extension pointing at
+localhost.
+
 Usage (from the repo root):
     python scripts/sync_extension_config.py
     python scripts/sync_extension_config.py --env backend/.env
+    python scripts/sync_extension_config.py --app-env production
 """
 
 from __future__ import annotations
@@ -26,6 +33,12 @@ KEY_LINE_RE = re.compile(
     r"^(?P<indent>\s*)EXTENSION_API_KEY:\s*(?P<value>.*?),\s*$",
     re.MULTILINE,
 )
+APP_ENV_RE = re.compile(r"^const APP_ENV\s*=\s*'(?P<value>[a-z]+)';", re.MULTILINE)
+
+API_BASE_FOR_ENV = {
+    "development": "http://localhost:8000",
+    "production": "https://nexuskitty.onrender.com",
+}
 
 
 def read_env_value(env_file: Path, name: str) -> str:
@@ -61,6 +74,21 @@ def inject_key(config_source: str, api_key: str) -> str:
     )
 
 
+def set_app_env(config_source: str, app_env: str) -> str:
+    """Point config.js at the chosen backend, and report which one that is."""
+    match = APP_ENV_RE.search(config_source)
+    if not match:
+        raise SystemExit(
+            "ERROR: no \"const APP_ENV = '...';\" line found in "
+            f"{CONFIG_FILE}."
+        )
+    return (
+        config_source[: match.start()]
+        + f"const APP_ENV = '{app_env}';"
+        + config_source[match.end() :]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -68,6 +96,15 @@ def main() -> int:
         type=Path,
         default=DEFAULT_ENV_FILE,
         help=f"path to the .env file (default: {DEFAULT_ENV_FILE})",
+    )
+    parser.add_argument(
+        "--app-env",
+        choices=sorted(API_BASE_FOR_ENV),
+        default=None,
+        help=(
+            "which backend the extension talks to. Omitted, APP_ENV is left "
+            "as it is."
+        ),
     )
     args = parser.parse_args()
 
@@ -78,14 +115,20 @@ def main() -> int:
 
     source = CONFIG_FILE.read_text(encoding="utf-8")
     updated = inject_key(source, api_key)
+    if args.app_env:
+        updated = set_app_env(updated, args.app_env)
+
+    current = APP_ENV_RE.search(updated)
+    app_env = current.group("value") if current else "?"
 
     if updated == source:
-        print(f"config.js already matches {args.env} - nothing to do.")
-        return 0
+        print(f"config.js already matches {args.env} - nothing to rewrite.")
+    else:
+        CONFIG_FILE.write_text(updated, encoding="utf-8")
+        # Only the fingerprint is printed; the key itself must stay out of logs.
+        print(f"Wrote EXTENSION_API_KEY (...{api_key[-6:]}) to {CONFIG_FILE}")
 
-    CONFIG_FILE.write_text(updated, encoding="utf-8")
-    # Only the fingerprint is printed; the key itself must stay out of logs.
-    print(f"Wrote EXTENSION_API_KEY (...{api_key[-6:]}) to {CONFIG_FILE}")
+    print(f"APP_ENV = '{app_env}' -> {API_BASE_FOR_ENV.get(app_env, 'unknown')}")
     print("Reload the extension in chrome://extensions to pick it up.")
     return 0
 

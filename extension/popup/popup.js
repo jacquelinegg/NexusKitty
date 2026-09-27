@@ -409,9 +409,13 @@ async function request(path, options = {}) {
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
-      throw new Error(`The backend did not answer ${path} within ${Math.round((options.timeoutMs || REQUEST_TIMEOUT_MS) / 1000)}s.`);
+      throw new Error(`The backend at ${API_BASE} did not answer ${path} within ${Math.round((options.timeoutMs || REQUEST_TIMEOUT_MS) / 1000)}s.`);
     }
-    throw error;
+    // "Failed to fetch" says nothing about where it tried. A popup configured for
+    // localhost while the local backend is not running produced the same message
+    // as a production outage, and the hint underneath it ("check that FastAPI
+    // runs on 127.0.0.1:8000") was wrong for anyone pointed at Render.
+    throw new Error(`Could not reach the backend at ${API_BASE} (${error?.message || error}).`);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -743,7 +747,7 @@ async function initialize() {
   } catch (error) {
     setStatus(false);
     popupLog('initialize failed', error?.message || String(error));
-    showError(`The request to the backend failed: ${error?.message || error}. Check that FastAPI runs on 127.0.0.1:8000 and reload the extension.`);
+    showError(`${error?.message || error}. The extension is pointing at APP_ENV's backend — check APP_ENV in extension/popup/config.js.`);
     console.error('NexusKitty initialization failed:', error);
   }
 }
